@@ -35,6 +35,7 @@ This repository now includes a modular foundation:
 - `VITE_APP_NAME`
 - `VITE_GOOGLE_PROJECT_ID`
 - `VITE_GOOGLE_CLIENT_ID`
+- `VITE_GOOGLE_AUTHORIZED_ORIGINS_HINT` (comma-separated, for setup hint messages)
 - `VITE_GOOGLE_API_KEY`
 - `VITE_GOOGLE_SCOPES`
 - `VITE_FEATURE_SHEETS_SYNC`
@@ -60,11 +61,14 @@ This repository now includes a modular foundation:
 
 ## OAuth Setup (Important)
 
-- `VITE_GOOGLE_CLIENT_ID` must be a **Web application** OAuth client ID, format: `*.apps.googleusercontent.com`.
-- In Google Cloud Console, set **Authorized JavaScript origins** to:
+- This app is **frontend-only** and uses Google Identity `initTokenClient` popup flow.
+- `VITE_GOOGLE_CLIENT_ID` must be a **Web application** OAuth client ID (`*.apps.googleusercontent.com`).
+- Do **not** use IAM OAuth client IDs (for example UUID-style IDs from `gcloud iam oauth-clients`).
+- In Google Cloud Console for this Web OAuth client, set **Authorized JavaScript origins** to:
    - `http://localhost:5173`
    - `http://127.0.0.1:5173`
-- If this is not configured, login will fail with `Error 401: invalid_client`.
+   - `https://farl.github.io` (for GitHub Pages)
+- This flow does not need backend auth code exchange; if configuration is wrong you may see `redirect_uri_mismatch` or `origin_mismatch`.
 
 ## Next Implementation Slice
 

@@ -23,6 +23,31 @@ let authState: SheetsConnectionStatus["authState"] = "idle";
 let accessToken: string | null = null;
 let accessTokenExpiresAt = 0;
 
+const splitCsv = (value: string): string[] =>
+  value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const getRequiredOrigins = (): string[] => {
+  const configured = splitCsv(appConfig.googleAuthorizedOriginsHint);
+  const currentOrigin = window.location.origin;
+  return Array.from(new Set([...configured, currentOrigin]));
+};
+
+const buildOriginSetupHint = (): string => {
+  const origins = getRequiredOrigins();
+  const list = origins.map((origin) => `- ${origin}`).join("\n");
+
+  return [
+    "Use Google Cloud Console Web OAuth Client settings:",
+    "1) Authorized JavaScript origins must include:",
+    list,
+    "2) Client ID must be a Web client ending with .apps.googleusercontent.com",
+    "3) Do not use IAM oauthClients/* IDs in frontend config",
+  ].join("\n");
+};
+
 const createConnectionStatus = (): SheetsConnectionStatus => ({
   authState,
 });
@@ -32,9 +57,15 @@ const assertSheetsConfig = (): void => {
     throw new Error("Google OAuth client id is missing. Please check VITE_GOOGLE_CLIENT_ID.");
   }
 
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(appConfig.googleClientId)) {
+    throw new Error(
+      `Invalid frontend OAuth client id: this looks like an IAM OAuth client id.\n${buildOriginSetupHint()}`,
+    );
+  }
+
   if (!appConfig.googleClientId.endsWith(".apps.googleusercontent.com")) {
     throw new Error(
-      "Invalid Google OAuth client id for browser login. Use a Web client ID ending with .apps.googleusercontent.com and add Authorized JavaScript origins: http://localhost:5173 and http://127.0.0.1:5173.",
+      `Invalid Google OAuth client id for browser login.\n${buildOriginSetupHint()}`,
     );
   }
 };
@@ -81,6 +112,17 @@ const requestAccessToken = async (options?: { silent?: boolean }): Promise<strin
       callback: (response) => {
         if (response.error || !response.access_token) {
           authState = "unauthorized";
+
+          if (response.error === "redirect_uri_mismatch") {
+            reject(new Error(`Google OAuth redirect_uri_mismatch.\n${buildOriginSetupHint()}`));
+            return;
+          }
+
+          if (response.error === "origin_mismatch") {
+            reject(new Error(`Google OAuth origin_mismatch.\n${buildOriginSetupHint()}`));
+            return;
+          }
+
           reject(new Error(response.error_description || response.error || "Google authorization failed."));
           return;
         }
