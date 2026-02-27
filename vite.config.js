@@ -7,8 +7,17 @@ export default defineConfig(function (_a) {
     var base = configuredBase.charAt(configuredBase.length - 1) === "/"
         ? configuredBase
         : "".concat(configuredBase, "/");
+    var securityHeaders = {
+        "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+    };
     return {
         base: base,
         plugins: [react()],
+        server: {
+            headers: securityHeaders,
+        },
+        preview: {
+            headers: securityHeaders,
+        },
     };
 });

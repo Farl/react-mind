@@ -15,6 +15,9 @@ const SHEETS_API_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const DRIVE_API_BASE = "https://www.googleapis.com/drive/v3";
 const STORE_FLAG_KEY = "reactMindGraphStore";
 const STORE_FLAG_VALUE = "true";
+const STORE_FOLDER_NAME = "react-mind";
+const STORE_FOLDER_FLAG_KEY = "reactMindStoreFolder";
+const STORE_FOLDER_FLAG_VALUE = "true";
 const ROW_HEADERS = ["kind", "id", "title", "parentId", "order", "fromNodeId", "toNodeId"];
 
 type GraphRowKind = "node" | "edge";
@@ -133,6 +136,11 @@ const requestAccessToken = async (options?: { silent?: boolean }): Promise<strin
       },
       error_callback: () => {
         authState = "unauthorized";
+        if (options?.silent) {
+          reject(new Error("Google silent authorization not available."));
+          return;
+        }
+
         reject(new Error("Google OAuth popup was blocked or cancelled."));
       },
     });
@@ -273,6 +281,57 @@ const buildHistoryPayload = (snapshot?: MindmapSnapshot): string => {
   });
 };
 
+const readMetaMap = async (spreadsheetId: string): Promise<Record<string, string>> => {
+  try {
+    const meta = await sheetsFetch<{ values?: string[][] }>(spreadsheetId, `/values/${encodeURIComponent("Meta!A:B")}`);
+    const map: Record<string, string> = {};
+    (meta.values || []).forEach((row) => {
+      const key = (row[0] || "").trim();
+      if (!key) {
+        return;
+      }
+      map[key] = row[1] || "";
+    });
+    return map;
+  } catch {
+    return {};
+  }
+};
+
+const writeMetaMap = async (spreadsheetId: string, metaMap: Record<string, string>): Promise<void> => {
+  const rows = Object.entries(metaMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => [key, value]);
+
+  const endRow = Math.max(rows.length + 100, 200);
+  await sheetsFetch<{ clearedRanges?: string[] }>(
+    spreadsheetId,
+    `/values/${encodeURIComponent(`Meta!A1:B${endRow}`)}:clear`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+
+  if (rows.length === 0) {
+    return;
+  }
+
+  await sheetsFetch<{ updatedCells?: number }>(spreadsheetId, "/values:batchUpdate", {
+    method: "POST",
+    body: JSON.stringify({
+      valueInputOption: "RAW",
+      data: [
+        {
+          range: `Meta!A1:B${rows.length}`,
+          majorDimension: "ROWS",
+          values: rows,
+        },
+      ],
+    }),
+  });
+};
+
 const setSpreadsheetAppProperties = async (spreadsheetId: string): Promise<void> => {
   await driveFetch(`/files/${spreadsheetId}?fields=id`, {
     method: "PATCH",
@@ -284,9 +343,38 @@ const setSpreadsheetAppProperties = async (spreadsheetId: string): Promise<void>
   });
 };
 
+const ensureStoreFolderId = async (): Promise<string> => {
+  const q = encodeURIComponent(
+    `mimeType='application/vnd.google-apps.folder' and trashed=false and appProperties has { key='${STORE_FOLDER_FLAG_KEY}' and value='${STORE_FOLDER_FLAG_VALUE}' }`,
+  );
+
+  const existing = await driveFetch<{
+    files?: Array<{ id: string; name: string }>;
+  }>(`/files?q=${q}&fields=files(id,name)&orderBy=modifiedTime desc&pageSize=1`);
+
+  const found = existing.files?.[0];
+  if (found?.id) {
+    return found.id;
+  }
+
+  const created = await driveFetch<{ id: string }>("/files?fields=id", {
+    method: "POST",
+    body: JSON.stringify({
+      name: STORE_FOLDER_NAME,
+      mimeType: "application/vnd.google-apps.folder",
+      appProperties: {
+        [STORE_FOLDER_FLAG_KEY]: STORE_FOLDER_FLAG_VALUE,
+      },
+    }),
+  });
+
+  return created.id;
+};
+
 const initializeGraphSheet = async (spreadsheetId: string, sheetTitle: string): Promise<void> => {
   const title = toSheetTitle(sheetTitle);
   const document = createEmptyMindmap(spreadsheetId, title);
+  const nowIso = new Date().toISOString();
   await sheetsFetch<{ clearedRanges?: string[] }>(spreadsheetId, `/values/${encodeURIComponent(title)}!A:G:clear`, {
     method: "POST",
     body: JSON.stringify({}),
@@ -306,24 +394,13 @@ const initializeGraphSheet = async (spreadsheetId: string, sheetTitle: string): 
     }),
   });
 
-  await sheetsFetch<{ updatedCells?: number }>(spreadsheetId, "/values:batchUpdate", {
-    method: "POST",
-    body: JSON.stringify({
-      valueInputOption: "RAW",
-      data: [
-        {
-          range: "Meta!A1:B4",
-          majorDimension: "ROWS",
-          values: [
-            ["projectId", appConfig.googleProjectId],
-            ["app", "react-mind"],
-            ["updatedAtIso", new Date().toISOString()],
-            ["activeGraph", title],
-          ],
-        },
-      ],
-    }),
-  });
+  const metaMap = await readMetaMap(spreadsheetId);
+  metaMap.projectId = appConfig.googleProjectId;
+  metaMap.app = "react-mind";
+  metaMap.updatedAtIso = nowIso;
+  metaMap.activeGraph = title;
+  metaMap[`updatedAtIso:${title}`] = nowIso;
+  await writeMetaMap(spreadsheetId, metaMap);
 };
 
 export const googleSheetsService: GoogleSheetsService = {
@@ -371,6 +448,8 @@ export const googleSheetsService: GoogleSheetsService = {
   async createGraphSpreadsheet(input: CreateGraphSpreadsheetInput) {
     assertSheetsConfig();
 
+    const folderId = await ensureStoreFolderId();
+
     const response = await driveFetch<{ id: string; name: string; modifiedTime?: string }>(
       "/files?fields=id,name,modifiedTime",
       {
@@ -378,6 +457,7 @@ export const googleSheetsService: GoogleSheetsService = {
         body: JSON.stringify({
           name: sanitizeStoreName(input.name),
           mimeType: "application/vnd.google-apps.spreadsheet",
+          parents: [folderId],
           appProperties: {
             [STORE_FLAG_KEY]: STORE_FLAG_VALUE,
           },
@@ -476,9 +556,15 @@ export const googleSheetsService: GoogleSheetsService = {
     const encodedRange = encodeURIComponent(`${title}!A1:G`);
     const result = await sheetsFetch<{ values?: string[][] }>(spreadsheetId, `/values/${encodedRange}`);
 
+    const metaMap = await readMetaMap(spreadsheetId);
+    const updatedAtIso = metaMap[`updatedAtIso:${title}`] || metaMap.updatedAtIso || new Date().toISOString();
+
     const rows = result.values || [];
     if (rows.length <= 1) {
-      return createEmptyMindmap(spreadsheetId, title);
+      return {
+        ...createEmptyMindmap(spreadsheetId, title),
+        updatedAtIso,
+      };
     }
 
     const dataRows = rows.slice(1);
@@ -486,7 +572,10 @@ export const googleSheetsService: GoogleSheetsService = {
     const edges = parseEdges(dataRows);
 
     if (nodes.length === 0) {
-      return createEmptyMindmap(spreadsheetId, title);
+      return {
+        ...createEmptyMindmap(spreadsheetId, title),
+        updatedAtIso,
+      };
     }
 
     return ensureRootNode({
@@ -494,23 +583,31 @@ export const googleSheetsService: GoogleSheetsService = {
       title,
       nodes,
       edges,
-      updatedAtIso: new Date().toISOString(),
+      updatedAtIso,
     });
   },
 
-  async saveMindmap({ spreadsheetId, sheetTitle, document, snapshot }: SaveMindmapInput) {
+  async saveMindmap({ spreadsheetId, sheetTitle, document, snapshot, expectedRemoteUpdatedAtIso }: SaveMindmapInput) {
     assertSheetsConfig();
 
     const title = toSheetTitle(sheetTitle);
+    const metaMap = await readMetaMap(spreadsheetId);
+    const remoteUpdatedAtIso = metaMap[`updatedAtIso:${title}`] || metaMap.updatedAtIso || "";
+
+    if (expectedRemoteUpdatedAtIso && remoteUpdatedAtIso && expectedRemoteUpdatedAtIso !== remoteUpdatedAtIso) {
+      throw new Error("SYNC_CONFLICT: Remote graph changed. Reload latest graph before saving.");
+    }
+
     const normalized = ensureRootNode({
       ...document,
       title,
     });
+    const nowIso = new Date().toISOString();
 
-    await sheetsFetch<{ clearedRanges?: string[] }>(spreadsheetId, `/values/${encodeURIComponent(`${title}!A:G`)}:clear`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
+    const rows = buildGraphRows(normalized);
+    const dataLastRow = rows.length;
+    const clearStartRow = dataLastRow + 1;
+    const clearEndRow = clearStartRow + 999;
 
     await sheetsFetch<{ updatedCells?: number }>(spreadsheetId, "/values:batchUpdate", {
       method: "POST",
@@ -520,23 +617,40 @@ export const googleSheetsService: GoogleSheetsService = {
           {
             range: `${title}!A1:G`,
             majorDimension: "ROWS",
-            values: buildGraphRows(normalized),
+            values: rows,
           },
           {
-            range: "Meta!A1:B5",
+            range: "Meta!A1:B1",
             majorDimension: "ROWS",
             values: [
-              ["projectId", appConfig.googleProjectId],
-              ["app", "react-mind"],
-              ["updatedAtIso", new Date().toISOString()],
-              ["activeGraph", title],
-              ["lastSave", buildHistoryPayload(snapshot)],
+              ["__meta_written_by", "react-mind"],
             ],
           },
         ],
       }),
     });
 
+    metaMap.projectId = appConfig.googleProjectId;
+    metaMap.app = "react-mind";
+    metaMap.updatedAtIso = nowIso;
+    metaMap.activeGraph = title;
+    metaMap.lastSave = buildHistoryPayload(snapshot);
+    metaMap[`updatedAtIso:${title}`] = nowIso;
+    metaMap[`lastSave:${title}`] = buildHistoryPayload(snapshot);
+    await writeMetaMap(spreadsheetId, metaMap);
+
+    await sheetsFetch<{ clearedRanges?: string[] }>(
+      spreadsheetId,
+      `/values/${encodeURIComponent(`${title}!A${clearStartRow}:G${clearEndRow}`)}:clear`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    );
+
     await setSpreadsheetAppProperties(spreadsheetId);
+    return {
+      updatedAtIso: nowIso,
+    };
   },
 };

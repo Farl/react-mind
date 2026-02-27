@@ -8,9 +8,18 @@ export default defineConfig(({ mode }) => {
     configuredBase.charAt(configuredBase.length - 1) === "/"
       ? configuredBase
       : `${configuredBase}/`;
+  const securityHeaders = {
+    "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+  };
 
   return {
     base,
     plugins: [react()],
+    server: {
+      headers: securityHeaders,
+    },
+    preview: {
+      headers: securityHeaders,
+    },
   };
 });

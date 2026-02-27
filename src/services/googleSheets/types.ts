@@ -27,6 +27,7 @@ export type SaveMindmapInput = {
   sheetTitle: string;
   document: MindmapDocument;
   snapshot?: MindmapSnapshot;
+  expectedRemoteUpdatedAtIso?: string;
 };
 
 export type CreateGraphSpreadsheetInput = {
@@ -48,5 +49,5 @@ export interface GoogleSheetsService {
   listGraphSheets: (spreadsheetId: string) => Promise<GraphSheet[]>;
   createGraphSheet: (input: CreateGraphSheetInput) => Promise<GraphSheet>;
   loadMindmap: (input: LoadMindmapInput) => Promise<MindmapDocument | null>;
-  saveMindmap: (input: SaveMindmapInput) => Promise<void>;
+  saveMindmap: (input: SaveMindmapInput) => Promise<{ updatedAtIso: string }>;
 }
