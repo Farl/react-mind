@@ -34,7 +34,15 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          VITE_APP_NAME: ${{ vars.VITE_APP_NAME }}
+          VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH }}
+          VITE_GOOGLE_PROJECT_ID: ${{ vars.VITE_GOOGLE_PROJECT_ID }}
+          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
+          VITE_GOOGLE_SCOPES: ${{ vars.VITE_GOOGLE_SCOPES }}
+          VITE_FEATURE_SHEETS_SYNC: ${{ vars.VITE_FEATURE_SHEETS_SYNC }}
+          VITE_FEATURE_HISTORY_PANEL: ${{ vars.VITE_FEATURE_HISTORY_PANEL }}
+          VITE_FEATURE_IMPORT_EXPORT: ${{ vars.VITE_FEATURE_IMPORT_EXPORT }}
+          VITE_GOOGLE_API_KEY: ${{ secrets.VITE_GOOGLE_API_KEY }}
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
