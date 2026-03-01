@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { MindmapDocument, MindmapNode, MindmapSnapshot } from "../domain/mindmap";
+import type { LayoutMode, MindmapDocument, MindmapNode, MindmapSnapshot } from "../domain/mindmap";
 import { createEmptyMindmap } from "../domain/mindmap";
 
 type EditorState = {
@@ -64,8 +64,8 @@ const buildChildrenMap = (nodes: MindmapNode[]): Map<string | null, MindmapNode[
 };
 
 const normalizeDocument = (document: MindmapDocument): MindmapDocument => {
-  const hasRoot = document.nodes.some((node) => node.id === "root");
-  if (hasRoot) {
+  const hasAnyRoot = document.nodes.some((node) => node.parentId === null);
+  if (hasAnyRoot) {
     return {
       ...document,
       nodes: cloneNodes(document.nodes),
@@ -95,7 +95,7 @@ export const useMindmapEditor = () => {
     const firstSnapshot = createSnapshot(initialDocument, "manual");
     return {
       document: initialDocument,
-      selectedNodeId: "root",
+      selectedNodeId: initialDocument.nodes[0]?.id ?? null,
       collapsedNodeIds: [],
       history: [firstSnapshot],
       historyIndex: 0,
@@ -182,6 +182,71 @@ export const useMindmapEditor = () => {
     });
   };
 
+  const addRootNode = (x?: number, y?: number) => {
+    setState((current) => {
+      const roots = current.document.nodes.filter((n) => n.parentId === null);
+      const newNode: MindmapNode = {
+        id: crypto.randomUUID(),
+        title: "New Topic",
+        parentId: null,
+        order: roots.length,
+        x,
+        y,
+      };
+
+      const nextDocument = withUpdatedTimestamp({
+        ...current.document,
+        nodes: [...current.document.nodes, newNode],
+      });
+
+      const historyState = pushHistory(current, nextDocument);
+
+      return {
+        ...current,
+        ...historyState,
+        document: nextDocument,
+        selectedNodeId: newNode.id,
+      };
+    });
+  };
+
+  type NodeStyleProps = {
+    borderRadius?: number | undefined;
+    bgColor?: string | undefined;
+    borderWidth?: number | undefined;
+    borderColor?: string | undefined;
+    textColor?: string | undefined;
+    nodeLayout?: LayoutMode | undefined;
+  };
+
+  const updateNodeStyle = (nodeId: string, style: NodeStyleProps) => {
+    setState((current) => {
+      const nextNodes = current.document.nodes.map((n) => (n.id === nodeId ? { ...n, ...style } : n));
+      const nextDocument = withUpdatedTimestamp({ ...current.document, nodes: nextNodes });
+      const historyState = pushHistory(current, nextDocument);
+      return { ...current, ...historyState, document: nextDocument };
+    });
+  };
+
+  const moveRootNode = (nodeId: string, x: number, y: number) => {
+    setState((current) => {
+      const node = current.document.nodes.find((n) => n.id === nodeId);
+      if (!node || node.parentId !== null) {
+        return current;
+      }
+
+      const nextNodes = current.document.nodes.map((n) => (n.id === nodeId ? { ...n, x, y } : n));
+      const nextDocument = withUpdatedTimestamp({ ...current.document, nodes: nextNodes });
+      const historyState = pushHistory(current, nextDocument);
+
+      return {
+        ...current,
+        ...historyState,
+        document: nextDocument,
+      };
+    });
+  };
+
   const renameNode = (nodeId: string, title: string) => {
     setState((current) => {
       const trimmed = title.trim();
@@ -216,7 +281,7 @@ export const useMindmapEditor = () => {
   const moveNode = (nodeId: string, nextParentId: string, nextIndex: number) => {
     setState((current) => {
       const movingNode = current.document.nodes.find((node) => node.id === nodeId);
-      if (!movingNode || movingNode.id === "root") {
+      if (!movingNode || movingNode.parentId === null) {
         return current;
       }
 
@@ -295,11 +360,13 @@ export const useMindmapEditor = () => {
   };
 
   const deleteNode = (nodeId: string) => {
-    if (nodeId === "root") {
-      return;
-    }
-
     setState((current) => {
+      const roots = current.document.nodes.filter((n) => n.parentId === null);
+      // Block deletion if it's the only root node
+      if (roots.length <= 1 && roots[0]?.id === nodeId) {
+        return current;
+      }
+
       const descendants = new Set<string>([nodeId]);
       let hasNewItem = true;
 
@@ -321,21 +388,20 @@ export const useMindmapEditor = () => {
 
       const historyState = pushHistory(current, nextDocument);
 
+      const remainingRoots = nextNodes.filter((n) => n.parentId === null);
+      const nextSelected = remainingRoots[0]?.id ?? nextNodes[0]?.id ?? null;
+
       return {
         ...current,
         ...historyState,
         document: nextDocument,
-        selectedNodeId: "root",
+        selectedNodeId: nextSelected,
         collapsedNodeIds: current.collapsedNodeIds.filter((id) => !descendants.has(id)),
       };
     });
   };
 
   const toggleNodeCollapsed = (nodeId: string) => {
-    if (nodeId === "root") {
-      return;
-    }
-
     setState((current) => {
       const hasChildren = current.document.nodes.some((node) => node.parentId === nodeId);
       if (!hasChildren) {
@@ -498,6 +564,9 @@ export const useMindmapEditor = () => {
     selectNode,
     addChildNode,
     addSiblingNode,
+    addRootNode,
+    moveRootNode,
+    updateNodeStyle,
     renameNode,
     deleteNode,
     toggleNodeCollapsed,

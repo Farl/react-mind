@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
+import type { LayoutMode } from "../domain/mindmap";
+import { isLayoutMode } from "../domain/mindmap";
 import { useMindmapEditor } from "../hooks/useMindmapEditor";
 import { googleSheetsService } from "../services/googleSheets/client";
 import type { GraphSheet, GraphSpreadsheet } from "../services/googleSheets/types";
@@ -20,6 +22,46 @@ const STORAGE_KEYS = {
 
 const AUTOSAVE_DELAY_MS = 800;
 const TOAST_DURATION_MS = 4000;
+
+function InspectorTitle({
+  nodeId,
+  title,
+  onCommit,
+}: {
+  nodeId: string;
+  title: string;
+  onCommit: (id: string, title: string) => void;
+}) {
+  const [draft, setDraft] = useState(title);
+
+  useEffect(() => {
+    setDraft(title);
+  }, [title]);
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== title) {
+      onCommit(nodeId, trimmed);
+    } else {
+      setDraft(title);
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      className="inspector-title"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
 
 export function EditorShell({ appName }: EditorShellProps) {
   type FileModalType = "open" | "newStore" | "newGraph" | "export";
@@ -50,6 +92,13 @@ export function EditorShell({ appName }: EditorShellProps) {
   const [toasts, setToasts] = useState<Array<{ id: number; tone: "info" | "error"; message: string }>>([]);
   const [openTarget, setOpenTarget] = useState<string>("");
   const [activeFileModal, setActiveFileModal] = useState<FileModalType | null>(null);
+  const [layoutMode] = useState<LayoutMode>(() => {
+    const stored = localStorage.getItem("reactMind.layoutMode");
+    return isLayoutMode(stored) ? stored : "balanced";
+  });
+  const [selectedTheme, setSelectedTheme] = useState<string>(
+    () => localStorage.getItem("reactMind.theme") || "classic",
+  );
 
   const parseSpreadsheetId = (input: string): string => {
     const trimmed = input.trim();
@@ -82,6 +131,11 @@ export function EditorShell({ appName }: EditorShellProps) {
   const toastIdRef = useRef<number>(0);
   const toastTimersRef = useRef<Map<number, number>>(new Map());
   const [isTaskPending, setIsTaskPending] = useState<boolean>(false);
+
+  useEffect(() => {
+    document.body.dataset.theme = selectedTheme === "classic" ? "" : selectedTheme;
+    localStorage.setItem("reactMind.theme", selectedTheme);
+  }, [selectedTheme]);
 
   const dismissToast = useCallback((id: number) => {
     const timer = toastTimersRef.current.get(id);
@@ -213,6 +267,11 @@ export function EditorShell({ appName }: EditorShellProps) {
   }, [spreadsheets, selectedSpreadsheetId]);
 
   const canEditGraph = connection.authState === "authorized" && !!selectedSpreadsheetId && !!selectedSheetTitle && graphLoaded;
+  const isLastRoot = (() => {
+    if (!editor.selectedNode) return false;
+    if (editor.selectedNode.parentId !== null) return false;
+    return editor.document.nodes.filter((n) => n.parentId === null).length <= 1;
+  })();
   const isSyncBusy = isTaskPending || isAutoSaving || isAuthPending;
   const syncLabel = (() => {
     if (hasSyncConflict) {
@@ -562,20 +621,6 @@ export function EditorShell({ appName }: EditorShellProps) {
     setExportMessage("JSON backup downloaded.");
   };
 
-  const selectedNodeDepth =
-    editor.selectedNode?.parentId === null
-      ? 0
-      : (() => {
-          let depth = 0;
-          let cursor = editor.selectedNode?.parentId ?? null;
-          while (cursor) {
-            const parent = editor.document.nodes.find((node) => node.id === cursor);
-            cursor = parent?.parentId ?? null;
-            depth += 1;
-          }
-          return depth;
-        })();
-
   useEffect(() => {
     if (connection.authState !== "authorized" || !selectedSpreadsheetId || !selectedSheetTitle || !graphLoaded) {
       invalidateAutosavePipeline();
@@ -748,7 +793,7 @@ export function EditorShell({ appName }: EditorShellProps) {
         return;
       }
 
-      if (!editor.selectedNode || !canEditGraph) {
+      if (!canEditGraph || !editor.selectedNode) {
         return;
       }
 
@@ -766,7 +811,7 @@ export function EditorShell({ appName }: EditorShellProps) {
         return;
       }
 
-      if (event.key === "Delete") {
+      if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         editor.deleteNode(editor.selectedNode.id);
         return;
@@ -831,7 +876,7 @@ export function EditorShell({ appName }: EditorShellProps) {
                   New Store...
                 </button>
                 <hr className="menu-dropdown__divider" />
-                <button type="button" onClick={() => openFileModal("export")} disabled={!canEditGraph}>
+                <button type="button" onClick={() => openFileModal("export")}>
                   Export...
                 </button>
               </div>
@@ -842,34 +887,57 @@ export function EditorShell({ appName }: EditorShellProps) {
               <div className="menu-dropdown__panel">
                 <button
                   type="button"
-                  onClick={() => editor.addChildNode(editor.selectedNode?.id ?? "root")}
-                  disabled={!canEditGraph}
+                  onClick={() => {
+                    const firstRoot = editor.document.nodes.find((n) => n.parentId === null);
+                    editor.addChildNode(editor.selectedNode?.id ?? firstRoot?.id ?? "");
+                    closeAllMenus();
+                  }}
                 >
                   Add Child
                 </button>
-                <button type="button" onClick={handleRename} disabled={!editor.selectedNode || !canEditGraph}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    editor.addRootNode();
+                    closeAllMenus();
+                  }}
+                >
+                  New Root Topic
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleRename();
+                    closeAllMenus();
+                  }}
+                  disabled={!editor.selectedNode}
+                >
                   Rename
                 </button>
                 <button
                   type="button"
-                  onClick={() => editor.selectedNode && editor.deleteNode(editor.selectedNode.id)}
-                  disabled={!editor.selectedNode || editor.selectedNode.id === "root" || !canEditGraph}
+                  onClick={() => {
+                    editor.selectedNode && editor.deleteNode(editor.selectedNode.id);
+                    closeAllMenus();
+                  }}
+                  disabled={!editor.selectedNode || isLastRoot}
                 >
                   Delete
                 </button>
                 <hr className="menu-dropdown__divider" />
-                <button type="button" onClick={editor.undo} disabled={editor.historyIndex <= 0 || !canEditGraph}>
+                <button type="button" onClick={editor.undo} disabled={editor.historyIndex <= 0}>
                   Undo
                 </button>
                 <button
                   type="button"
                   onClick={editor.redo}
-                  disabled={editor.historyIndex >= editor.historyCount - 1 || !canEditGraph}
+                  disabled={editor.historyIndex >= editor.historyCount - 1}
                 >
                   Redo
                 </button>
               </div>
             </details>
+
           </nav>
         </div>
         <div className="topbar__actions">
@@ -886,45 +954,78 @@ export function EditorShell({ appName }: EditorShellProps) {
         </div>
       </header>
 
+      {connection.authState !== "authorized" ? (
+        <section className="canvas canvas--state">
+          <div className="auth-state-card">
+            {isAuthPending ? (
+              <>
+                <span className="saving-spinner" aria-label="signing in" />
+                <p className="hint-text">Signing in to Google…</p>
+              </>
+            ) : (
+              <>
+                <h3>Sign in required</h3>
+                <p>Please sign in with Google to load graph stores and open the canvas.</p>
+                <button type="button" onClick={handleConnect} className="topbar__btn topbar__btn--primary">
+                  Sign In Google
+                </button>
+              </>
+            )}
+          </div>
+        </section>
+      ) : (
       <section className="layout">
-        {isAuthPending ? (
-          <section className="canvas canvas--state">
-            <div className="auth-state-card">
-              <span className="saving-spinner saving-spinner--lg" aria-label="authorizing" />
-              <h3>Signing in...</h3>
-              <p>Completing Google authorization and restoring your graph workspace.</p>
+        <section className="canvas canvas--content">
+          <div className="canvas-shell">
+            <div className="canvas-shell__head">
+              {!canEditGraph ? (
+                <p className="hint-text">Select a graph sheet to enable editing.</p>
+              ) : null}
             </div>
-          </section>
-        ) : connection.authState !== "authorized" ? (
-          <section className="canvas canvas--state">
-            <div className="auth-state-card">
-              <h3>Sign in required</h3>
-              <p>Please sign in with Google to load graph stores and open the canvas.</p>
-              <button type="button" onClick={handleConnect} className="topbar__btn topbar__btn--primary">
-                Sign In Google
-              </button>
+
+            <div className="canvas-shell__body">
+              <div className="canvas-overlay">
+                <div className="palette-row">
+                  {(
+                    [
+                      { value: "classic", color: "#6366f1", title: "Classic" },
+                      { value: "ocean", color: "#0ea5e9", title: "Ocean" },
+                      { value: "forest", color: "#16a34a", title: "Forest" },
+                      { value: "sunset", color: "#e11d48", title: "Sunset" },
+                      { value: "minimal", color: "#9ca3af", title: "Minimal" },
+                    ] as const
+                  ).map(({ value, color, title }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      title={title}
+                      className={`palette-swatch${selectedTheme === value ? " palette-swatch--active" : ""}`}
+                      style={{ background: color }}
+                      onClick={() => setSelectedTheme(value)}
+                    />
+                  ))}
+                </div>
+                <span className="canvas-overlay__sep" />
+                <span className="canvas-overlay__hint" title="Tab=child  Enter=sibling  Del/Backspace=delete  Arrows=navigate  Ctrl+Z/Y=undo/redo  Dbl-click=rename/new root">
+                  <span className="material-symbols-rounded">keyboard</span>
+                </span>
+              </div>
+              <MindmapCanvas
+                nodes={editor.document.nodes}
+                selectedNodeId={editor.selectedNode?.id ?? null}
+                collapsedNodeIds={editor.collapsedNodeIds}
+                editable={canEditGraph}
+                layoutMode={layoutMode}
+                onSelectNode={editor.selectNode}
+                onRenameNode={editor.renameNode}
+                onToggleCollapse={editor.toggleNodeCollapsed}
+                onMoveNode={editor.moveNode}
+                onMoveRootNode={editor.moveRootNode}
+                onAddRootNode={(x, y) => editor.addRootNode(x, y)}
+              />
             </div>
-          </section>
-        ) : (
-          <section className="canvas canvas--content">
-            <div className="canvas-shell">
-              <div className="canvas-shell__head">
-                {!canEditGraph ? <p className="hint-text">Select a graph sheet to unlock editing.</p> : null}
-              </div>
 
-              <div className="canvas-shell__body">
-                <MindmapCanvas
-                  nodes={editor.document.nodes}
-                  selectedNodeId={editor.selectedNode?.id ?? null}
-                  collapsedNodeIds={editor.collapsedNodeIds}
-                  editable={canEditGraph}
-                  onSelectNode={editor.selectNode}
-                  onRenameNode={editor.renameNode}
-                  onToggleCollapse={editor.toggleNodeCollapsed}
-                  onMoveNode={editor.moveNode}
-                />
-              </div>
-
+            {connection.authState === "authorized" ? (
               <footer className="sheet-footer">
                 <div className="sheet-tabs" aria-label="Graph sheets tabs">
                   <div className="sheet-tabs__list">
@@ -937,7 +1038,7 @@ export function EditorShell({ appName }: EditorShellProps) {
                           type="button"
                           className={`sheet-tab${sheet.title === selectedSheetTitle ? " sheet-tab--active" : ""}`}
                           onClick={() => void handleSheetChange(sheet.title)}
-                          disabled={connection.authState !== "authorized" || !selectedSpreadsheetId}
+                          disabled={!selectedSpreadsheetId}
                           aria-current={sheet.title === selectedSheetTitle ? "page" : undefined}
                         >
                           {sheet.title}
@@ -950,7 +1051,7 @@ export function EditorShell({ appName }: EditorShellProps) {
                     type="button"
                     className="sheet-tab sheet-tab--add"
                     onClick={() => openFileModal("newGraph")}
-                    disabled={connection.authState !== "authorized" || !selectedSpreadsheetId}
+                    disabled={!selectedSpreadsheetId}
                     aria-label="Add graph sheet"
                     title="Add graph sheet"
                   >
@@ -966,11 +1067,11 @@ export function EditorShell({ appName }: EditorShellProps) {
                     {syncLabel}
                     {isSyncBusy ? <span className="saving-spinner" aria-label="saving" /> : null}
                   </span>
-                  <span className="status-chip" title="Editing availability">
+                  <span className="status-chip" title="Cloud sync">
                     <span className="material-symbols-rounded" aria-hidden="true">
-                      {canEditGraph ? "lock_open" : "lock"}
+                      {canEditGraph ? "cloud_done" : "cloud_off"}
                     </span>
-                    {canEditGraph ? "Editable" : "Locked"}
+                    {canEditGraph ? "Synced" : "Local"}
                   </span>
                   {hasSyncConflict ? (
                     <span className="status-chip status-chip--warn" title="Conflict detected">
@@ -990,51 +1091,202 @@ export function EditorShell({ appName }: EditorShellProps) {
                   </button>
                 </div>
               </footer>
-            </div>
-          </section>
-        )}
+            ) : null}
+          </div>
+        </section>
 
         <aside className="panel">
           <h2>Inspector</h2>
-          <ul className="kv">
-            <li>Selection: {editor.selectedNode?.title ?? "none"}</li>
-            <li>Depth: {selectedNodeDepth}</li>
-            <li>Nodes: {editor.document.nodes.length}</li>
-            <li>History: {editor.historyIndex + 1}/{editor.historyCount}</li>
-            <li>Shortcuts: Tab / Enter / Delete / Arrows / Ctrl+Z / Ctrl+Y</li>
-          </ul>
 
-          <div className="toolbar">
-            <button
-              type="button"
-              onClick={() => editor.addChildNode(editor.selectedNode?.id ?? "root")}
-              disabled={!canEditGraph}
-            >
-              Add Child
-            </button>
-            <button type="button" onClick={handleRename} disabled={!editor.selectedNode || !canEditGraph}>
-              Rename
-            </button>
-            <button
-              type="button"
-              onClick={() => editor.selectedNode && editor.deleteNode(editor.selectedNode.id)}
-              disabled={!editor.selectedNode || editor.selectedNode.id === "root" || !canEditGraph}
-            >
-              Delete
-            </button>
-            <button type="button" onClick={editor.undo} disabled={editor.historyIndex <= 0 || !canEditGraph}>
-              Undo
-            </button>
-            <button
-              type="button"
-              onClick={editor.redo}
-              disabled={editor.historyIndex >= editor.historyCount - 1 || !canEditGraph}
-            >
-              Redo
-            </button>
-          </div>
+          {editor.selectedNode ? (
+            <div className="inspector-node">
+              <InspectorTitle
+                key={editor.selectedNode.id}
+                nodeId={editor.selectedNode.id}
+                title={editor.selectedNode.title}
+                onCommit={editor.renameNode}
+              />
+
+              <div className="inspector-row">
+                <label className="inspector-label">Radius</label>
+                <div className="layout-mode-btns">
+                  {(
+                    [
+                      { value: 0, icon: "crop_square", title: "Sharp" },
+                      { value: 8, icon: "rounded_corner", title: "Rounded" },
+                      { value: 999, icon: "circle", title: "Pill" },
+                    ] as const
+                  ).map(({ value, icon, title }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      title={title}
+                      className={`layout-mode-btn${(editor.selectedNode?.borderRadius ?? 8) === value ? " layout-mode-btn--active" : ""}`}
+                      onClick={() =>
+                        editor.selectedNode &&
+                        editor.updateNodeStyle(editor.selectedNode.id, {
+                          borderRadius: value === 8 ? undefined : value,
+                        })
+                      }
+                    >
+                      <span className="material-symbols-rounded">{icon}</span>
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  max={999}
+                  value={editor.selectedNode.borderRadius ?? 8}
+                  style={{ width: 52 }}
+                  onChange={(e) =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, {
+                      borderRadius: Number(e.target.value) === 8 ? undefined : Number(e.target.value),
+                    })
+                  }
+                />
+              </div>
+
+              <div className="inspector-row">
+                <label className="inspector-label">Fill</label>
+                <button
+                  type="button"
+                  className={`inspector-preset-btn${editor.selectedNode.bgColor === "transparent" ? " inspector-preset-btn--active" : ""}`}
+                  title="No fill (transparent)"
+                  onClick={() =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { bgColor: "transparent" })
+                  }
+                >
+                  <span className="material-symbols-rounded">block</span>
+                </button>
+                <input
+                  type="color"
+                  value={editor.selectedNode.bgColor && editor.selectedNode.bgColor !== "transparent" ? editor.selectedNode.bgColor : "#ffffff"}
+                  onChange={(e) =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { bgColor: e.target.value })
+                  }
+                />
+                <button
+                  type="button"
+                  className="inspector-clear"
+                  title="Reset to theme default"
+                  onClick={() =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { bgColor: undefined })
+                  }
+                >
+                  <span className="material-symbols-rounded">restart_alt</span>
+                </button>
+              </div>
+
+              <div className="inspector-row">
+                <label className="inspector-label">Border</label>
+                <button
+                  type="button"
+                  className={`inspector-preset-btn${(editor.selectedNode.borderWidth ?? 1) === 0 ? " inspector-preset-btn--active" : ""}`}
+                  title="No border"
+                  onClick={() =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { borderWidth: 0, borderColor: undefined })
+                  }
+                >
+                  <span className="material-symbols-rounded">block</span>
+                </button>
+                <input
+                  type="number"
+                  min={0}
+                  max={16}
+                  value={editor.selectedNode.borderWidth ?? 1}
+                  style={{ width: 52 }}
+                  onChange={(e) =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { borderWidth: Number(e.target.value) })
+                  }
+                />
+                <input
+                  type="color"
+                  value={editor.selectedNode.borderColor || "#6b7280"}
+                  onChange={(e) =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { borderColor: e.target.value })
+                  }
+                />
+                <button
+                  type="button"
+                  className="inspector-clear"
+                  title="Reset to default"
+                  onClick={() =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { borderWidth: undefined, borderColor: undefined })
+                  }
+                >
+                  <span className="material-symbols-rounded">restart_alt</span>
+                </button>
+              </div>
+
+              <div className="inspector-row">
+                <label className="inspector-label">Text</label>
+                <input
+                  type="color"
+                  value={editor.selectedNode.textColor || "#111827"}
+                  onChange={(e) =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { textColor: e.target.value })
+                  }
+                />
+                <button
+                  type="button"
+                  className="inspector-clear"
+                  title="Reset to default"
+                  onClick={() =>
+                    editor.selectedNode &&
+                    editor.updateNodeStyle(editor.selectedNode.id, { textColor: undefined })
+                  }
+                >
+                  <span className="material-symbols-rounded">restart_alt</span>
+                </button>
+              </div>
+
+              <div className="inspector-row">
+                <label className="inspector-label">Layout</label>
+                <div className="layout-mode-btns">
+                  {(
+                    [
+                      { value: "", icon: "remove", title: "Inherit" },
+                      { value: "balanced", icon: "hub", title: "Balanced" },
+                      { value: "right", icon: "east", title: "Right" },
+                      { value: "left", icon: "west", title: "Left" },
+                      { value: "down", icon: "south", title: "Down" },
+                      { value: "up", icon: "north", title: "Up" },
+                    ] as const
+                  ).map(({ value, icon, title }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      title={title}
+                      className={`layout-mode-btn${(editor.selectedNode?.nodeLayout || "") === value ? " layout-mode-btn--active" : ""}`}
+                      onClick={() =>
+                        editor.selectedNode &&
+                        editor.updateNodeStyle(editor.selectedNode.id, {
+                          nodeLayout: (value as LayoutMode) || undefined,
+                        })
+                      }
+                    >
+                      <span className="material-symbols-rounded">{icon}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="inspector-empty">Select a node to inspect</div>
+          )}
         </aside>
       </section>
+      )}
 
       <AppModal
         isOpen={activeFileModal === "open"}

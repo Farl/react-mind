@@ -1,6 +1,6 @@
 import { appConfig } from "../../config/env";
 import type { MindmapDocument, MindmapEdge, MindmapNode, MindmapSnapshot } from "../../domain/mindmap";
-import { createEmptyMindmap } from "../../domain/mindmap";
+import { createEmptyMindmap, isLayoutMode } from "../../domain/mindmap";
 import type {
   CreateGraphSheetInput,
   CreateGraphSpreadsheetInput,
@@ -18,9 +18,20 @@ const STORE_FLAG_VALUE = "true";
 const STORE_FOLDER_NAME = "react-mind";
 const STORE_FOLDER_FLAG_KEY = "reactMindStoreFolder";
 const STORE_FOLDER_FLAG_VALUE = "true";
-const ROW_HEADERS = ["kind", "id", "title", "parentId", "order", "fromNodeId", "toNodeId"];
+const ROW_HEADERS = ["kind", "id", "title", "parentId", "order", "fromNodeId", "toNodeId", "x", "y", "borderRadius",
+  "bgColor", "borderWidth", "borderColor", "textColor", "nodeLayout"];
 
 type GraphRowKind = "node" | "edge";
+
+/** Backward compat: old sheets store shape strings, new ones store numeric borderRadius */
+const SHAPE_TO_RADIUS: Record<string, number> = { rect: 0, pill: 999 };
+const parseBorderRadius = (raw: string | undefined): number | undefined => {
+  if (!raw) return undefined;
+  if (raw in SHAPE_TO_RADIUS) return SHAPE_TO_RADIUS[raw];
+  if (raw === "rounded" || raw === "diamond") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+};
 
 let authState: SheetsConnectionStatus["authState"] = "idle";
 let accessToken: string | null = null;
@@ -211,6 +222,14 @@ const parseNodes = (rows: string[][]): MindmapNode[] => {
       title: row[2] || "Untitled",
       parentId: row[3] || null,
       order: Number(row[4] || 0),
+      x: row[7] ? Number(row[7]) : undefined,
+      y: row[8] ? Number(row[8]) : undefined,
+      borderRadius: parseBorderRadius(row[9]),
+      bgColor: row[10] || undefined,
+      borderWidth: row[11] ? Number(row[11]) : undefined,
+      borderColor: row[12] || undefined,
+      textColor: row[13] || undefined,
+      nodeLayout: isLayoutMode(row[14]) ? row[14] : undefined,
     }));
 };
 
@@ -225,7 +244,7 @@ const parseEdges = (rows: string[][]): MindmapEdge[] => {
 };
 
 const ensureRootNode = (document: MindmapDocument): MindmapDocument => {
-  if (document.nodes.some((node) => node.id === "root")) {
+  if (document.nodes.some((node) => node.parentId === null)) {
     return document;
   }
 
@@ -252,6 +271,14 @@ const buildGraphRows = (document: MindmapDocument): string[][] => {
     String(node.order),
     "",
     "",
+    node.x != null ? String(node.x) : "",
+    node.y != null ? String(node.y) : "",
+    node.borderRadius != null ? String(node.borderRadius) : "",
+    node.bgColor ?? "",
+    node.borderWidth != null ? String(node.borderWidth) : "",
+    node.borderColor ?? "",
+    node.textColor ?? "",
+    node.nodeLayout ?? "",
   ]);
 
   const edgeRows = document.edges.map((edge) => [
@@ -262,6 +289,14 @@ const buildGraphRows = (document: MindmapDocument): string[][] => {
     "",
     edge.fromNodeId,
     edge.toNodeId,
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
   ]);
 
   return [ROW_HEADERS, ...nodeRows, ...edgeRows];
@@ -375,7 +410,7 @@ const initializeGraphSheet = async (spreadsheetId: string, sheetTitle: string): 
   const title = toSheetTitle(sheetTitle);
   const document = createEmptyMindmap(spreadsheetId, title);
   const nowIso = new Date().toISOString();
-  await sheetsFetch<{ clearedRanges?: string[] }>(spreadsheetId, `/values/${encodeURIComponent(title)}!A:G:clear`, {
+  await sheetsFetch<{ clearedRanges?: string[] }>(spreadsheetId, `/values/${encodeURIComponent(title)}!A:O:clear`, {
     method: "POST",
     body: JSON.stringify({}),
   });
@@ -386,7 +421,7 @@ const initializeGraphSheet = async (spreadsheetId: string, sheetTitle: string): 
       valueInputOption: "RAW",
       data: [
         {
-          range: `${title}!A1:G`,
+          range: `${title}!A1:O`,
           majorDimension: "ROWS",
           values: buildGraphRows(document),
         },
@@ -553,7 +588,7 @@ export const googleSheetsService: GoogleSheetsService = {
     assertSheetsConfig();
 
     const title = toSheetTitle(sheetTitle);
-    const encodedRange = encodeURIComponent(`${title}!A1:G`);
+    const encodedRange = encodeURIComponent(`${title}!A1:O`);
     const result = await sheetsFetch<{ values?: string[][] }>(spreadsheetId, `/values/${encodedRange}`);
 
     const metaMap = await readMetaMap(spreadsheetId);
@@ -615,7 +650,7 @@ export const googleSheetsService: GoogleSheetsService = {
         valueInputOption: "RAW",
         data: [
           {
-            range: `${title}!A1:G`,
+            range: `${title}!A1:O`,
             majorDimension: "ROWS",
             values: rows,
           },
@@ -641,7 +676,7 @@ export const googleSheetsService: GoogleSheetsService = {
 
     await sheetsFetch<{ clearedRanges?: string[] }>(
       spreadsheetId,
-      `/values/${encodeURIComponent(`${title}!A${clearStartRow}:G${clearEndRow}`)}:clear`,
+      `/values/${encodeURIComponent(`${title}!A${clearStartRow}:O${clearEndRow}`)}:clear`,
       {
         method: "POST",
         body: JSON.stringify({}),

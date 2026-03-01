@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { MindmapNode } from "../domain/mindmap";
+import type { LayoutMode, MindmapNode } from "../domain/mindmap";
 
 type PositionedNode = {
   node: MindmapNode;
@@ -8,6 +8,7 @@ type PositionedNode = {
   y: number;
   width: number;
   height: number;
+  direction: "left" | "right" | "root" | "down" | "up";
 };
 
 type MindmapCanvasProps = {
@@ -15,16 +16,26 @@ type MindmapCanvasProps = {
   selectedNodeId: string | null;
   collapsedNodeIds: string[];
   editable: boolean;
+  layoutMode: LayoutMode;
   onSelectNode: (nodeId: string) => void;
   onRenameNode: (nodeId: string, title: string) => void;
   onToggleCollapse: (nodeId: string) => void;
   onMoveNode: (nodeId: string, nextParentId: string, nextIndex: number) => void;
+  onMoveRootNode: (nodeId: string, x: number, y: number) => void;
+  onAddRootNode: (x: number, y: number) => void;
 };
 
 const NODE_WIDTH = 170;
 const NODE_HEIGHT = 42;
+const ROOT_NODE_WIDTH = 200;
+const ROOT_NODE_HEIGHT = 52;
 const H_GAP = 180;
 const V_GAP = 22;
+const BETWEEN_GAP = H_GAP - NODE_WIDTH; // 10px
+const CANVAS_PAD = 80;
+// Vertical layout constants
+const V_LEVEL_GAP = 64; // gap between depth levels (top-to-bottom)
+const H_NODE_GAP = 20; // gap between siblings in vertical layouts
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 2;
 const SCALE_STEP = 0.1;
@@ -33,6 +44,14 @@ type DraggingState = {
   nodeId: string;
   parentId: string;
   currentY: number;
+};
+
+type RootDraggingState = {
+  nodeId: string;
+  startLayoutX: number;
+  startLayoutY: number;
+  startPointerX: number;
+  startPointerY: number;
 };
 
 const groupByParent = (nodes: MindmapNode[]) => {
@@ -53,24 +72,6 @@ const groupByParent = (nodes: MindmapNode[]) => {
   return childrenMap;
 };
 
-const buildDepth = (rootId: string, childrenMap: Map<string | null, MindmapNode[]>) => {
-  const depth = new Map<string, number>([[rootId, 0]]);
-  const queue = [rootId];
-
-  while (queue.length > 0) {
-    const current = queue.shift() as string;
-    const currentDepth = depth.get(current) || 0;
-    const children = childrenMap.get(current) || [];
-
-    children.forEach((child) => {
-      depth.set(child.id, currentDepth + 1);
-      queue.push(child.id);
-    });
-  }
-
-  return depth;
-};
-
 const buildSubtreeHeight = (
   nodeId: string,
   childrenMap: Map<string | null, MindmapNode[]>,
@@ -85,56 +86,251 @@ const buildSubtreeHeight = (
     return NODE_HEIGHT;
   }
 
-  const childHeights: number[] = children.map((child) => buildSubtreeHeight(child.id, childrenMap, collapsedNodeIds));
+  const childHeights: number[] = children.map((child) =>
+    buildSubtreeHeight(child.id, childrenMap, collapsedNodeIds),
+  );
   return childHeights.reduce((sum: number, h: number) => sum + h, 0) + V_GAP * (children.length - 1);
 };
 
-const layoutNodes = (nodes: MindmapNode[], collapsedNodeIds: Set<string>): PositionedNode[] => {
-  if (nodes.length === 0) {
-    return [];
-  }
+const computeGroupHeight = (
+  nodes: MindmapNode[],
+  childrenMap: Map<string | null, MindmapNode[]>,
+  collapsedNodeIds: Set<string>,
+): number => {
+  if (nodes.length === 0) return 0;
+  const heights = nodes.map((n) => buildSubtreeHeight(n.id, childrenMap, collapsedNodeIds));
+  return heights.reduce((sum, h) => sum + h, 0) + V_GAP * (nodes.length - 1);
+};
 
-  const root = nodes.find((node) => node.parentId === null) || nodes[0];
+const buildSubtreeWidth = (
+  nodeId: string,
+  childrenMap: Map<string | null, MindmapNode[]>,
+  collapsedNodeIds: Set<string>,
+): number => {
+  if (collapsedNodeIds.has(nodeId)) return NODE_WIDTH;
+  const children = childrenMap.get(nodeId) || [];
+  if (children.length === 0) return NODE_WIDTH;
+  const widths = children.map((c) => buildSubtreeWidth(c.id, childrenMap, collapsedNodeIds));
+  return widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (children.length - 1);
+};
+
+const computeGroupWidth = (
+  nodes: MindmapNode[],
+  childrenMap: Map<string | null, MindmapNode[]>,
+  collapsedNodeIds: Set<string>,
+): number => {
+  if (nodes.length === 0) return 0;
+  const widths = nodes.map((n) => buildSubtreeWidth(n.id, childrenMap, collapsedNodeIds));
+  return widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (nodes.length - 1);
+};
+
+const layoutNodesHorizontal = (
+  nodes: MindmapNode[],
+  roots: MindmapNode[],
+  collapsedNodeIds: Set<string>,
+  layoutMode: "balanced" | "right" | "left",
+): PositionedNode[] => {
   const childrenMap = groupByParent(nodes);
-  const depthMap = buildDepth(root.id, childrenMap);
-
   const positioned = new Map<string, PositionedNode>();
 
-  const place = (nodeId: string, top: number): number => {
-    const node = nodes.find((item) => item.id === nodeId);
-    if (!node) {
-      return NODE_HEIGHT;
+  roots.forEach((root, rootIdx) => {
+    const rootLayoutX = root.x ?? rootIdx * 800;
+    const rootLayoutY = root.y ?? 200;
+
+    const rootChildren = childrenMap.get(root.id) || [];
+
+    let rightChildren: MindmapNode[];
+    let leftChildren: MindmapNode[];
+
+    const effectiveLayout = root.nodeLayout ?? layoutMode;
+    if (effectiveLayout === "balanced" && rootChildren.length > 0) {
+      const rightCount = Math.ceil(rootChildren.length / 2);
+      rightChildren = rootChildren.slice(0, rightCount);
+      leftChildren = rootChildren.slice(rightCount);
+    } else if (effectiveLayout === "left") {
+      rightChildren = [];
+      leftChildren = rootChildren;
+    } else {
+      rightChildren = rootChildren;
+      leftChildren = [];
     }
 
-    const children = childrenMap.get(nodeId) || [];
-    const subtreeHeight = buildSubtreeHeight(nodeId, childrenMap, collapsedNodeIds);
-    const centerY = top + subtreeHeight / 2;
-    const x = (depthMap.get(nodeId) || 0) * H_GAP;
-
-    positioned.set(nodeId, {
-      node,
-      x,
-      y: centerY - NODE_HEIGHT / 2,
-      width: NODE_WIDTH,
-      height: NODE_HEIGHT,
+    positioned.set(root.id, {
+      node: root,
+      x: rootLayoutX,
+      y: rootLayoutY,
+      width: ROOT_NODE_WIDTH,
+      height: ROOT_NODE_HEIGHT,
+      direction: "root",
     });
 
-    if (collapsedNodeIds.has(nodeId)) {
-      return NODE_HEIGHT;
-    }
+    const placeSubtree = (nodeId: string, topAbsolute: number, dir: "left" | "right", depth: number): number => {
+      const node = nodes.find((n) => n.id === nodeId);
+      if (!node) return 0;
 
-    let cursorTop = top;
-    children.forEach((child) => {
-      const childHeight = place(child.id, cursorTop);
-      cursorTop += childHeight + V_GAP;
+      const subtreeH = buildSubtreeHeight(nodeId, childrenMap, collapsedNodeIds);
+      const y = topAbsolute + subtreeH / 2 - NODE_HEIGHT / 2;
+
+      const x =
+        dir === "right"
+          ? rootLayoutX + ROOT_NODE_WIDTH + BETWEEN_GAP + (depth - 1) * H_GAP
+          : rootLayoutX - BETWEEN_GAP - NODE_WIDTH - (depth - 1) * H_GAP;
+
+      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: dir });
+
+      if (!collapsedNodeIds.has(nodeId)) {
+        const children = childrenMap.get(nodeId) || [];
+        const effectiveLayout = node.nodeLayout ?? null;
+
+        if (effectiveLayout === "balanced" && children.length > 0) {
+          const rightCount = Math.ceil(children.length / 2);
+          const rightKids = children.slice(0, rightCount);
+          const leftKids = children.slice(rightCount);
+          const rightGroupH = computeGroupHeight(rightKids, childrenMap, collapsedNodeIds);
+          let cursor = topAbsolute + subtreeH / 2 - rightGroupH / 2;
+          rightKids.forEach((child) => {
+            const h = placeSubtree(child.id, cursor, "right", depth + 1);
+            cursor += h + V_GAP;
+          });
+          const leftGroupH = computeGroupHeight(leftKids, childrenMap, collapsedNodeIds);
+          cursor = topAbsolute + subtreeH / 2 - leftGroupH / 2;
+          leftKids.forEach((child) => {
+            const h = placeSubtree(child.id, cursor, "left", depth + 1);
+            cursor += h + V_GAP;
+          });
+        } else {
+          const childDir: "left" | "right" =
+            effectiveLayout === "right" ? "right" : effectiveLayout === "left" ? "left" : dir;
+          let cursor = topAbsolute;
+          children.forEach((child) => {
+            const h = placeSubtree(child.id, cursor, childDir, depth + 1);
+            cursor += h + V_GAP;
+          });
+        }
+      }
+
+      return subtreeH;
+    };
+
+    const rightGroupH = computeGroupHeight(rightChildren, childrenMap, collapsedNodeIds);
+    let cursor = rootLayoutY + ROOT_NODE_HEIGHT / 2 - rightGroupH / 2;
+    rightChildren.forEach((child) => {
+      const h = placeSubtree(child.id, cursor, "right", 1);
+      cursor += h + V_GAP;
     });
 
-    return subtreeHeight;
-  };
-
-  place(root.id, 0);
+    const leftGroupH = computeGroupHeight(leftChildren, childrenMap, collapsedNodeIds);
+    cursor = rootLayoutY + ROOT_NODE_HEIGHT / 2 - leftGroupH / 2;
+    leftChildren.forEach((child) => {
+      const h = placeSubtree(child.id, cursor, "left", 1);
+      cursor += h + V_GAP;
+    });
+  });
 
   return Array.from(positioned.values());
+};
+
+const layoutNodesVertical = (
+  nodes: MindmapNode[],
+  roots: MindmapNode[],
+  collapsedNodeIds: Set<string>,
+  mode: "down" | "up",
+): PositionedNode[] => {
+  const childrenMap = groupByParent(nodes);
+  const positioned = new Map<string, PositionedNode>();
+
+  roots.forEach((root, rootIdx) => {
+    const rootLayoutX = root.x ?? rootIdx * 800;
+    const rootLayoutY = root.y ?? 200;
+
+    const rootChildren = childrenMap.get(root.id) || [];
+    const totalChildrenWidth = computeGroupWidth(rootChildren, childrenMap, collapsedNodeIds);
+    const childrenStartX =
+      rootChildren.length > 0 ? rootLayoutX + ROOT_NODE_WIDTH / 2 - totalChildrenWidth / 2 : rootLayoutX;
+
+    positioned.set(root.id, {
+      node: root,
+      x: rootLayoutX,
+      y: rootLayoutY,
+      width: ROOT_NODE_WIDTH,
+      height: ROOT_NODE_HEIGHT,
+      direction: "root",
+    });
+
+    const placeSubtree = (nodeId: string, leftEdge: number, depth: number): void => {
+      const node = nodes.find((n) => n.id === nodeId);
+      if (!node) return;
+
+      const sw = buildSubtreeWidth(nodeId, childrenMap, collapsedNodeIds);
+      const x = leftEdge + sw / 2 - NODE_WIDTH / 2;
+      const y =
+        mode === "down"
+          ? rootLayoutY + ROOT_NODE_HEIGHT + V_LEVEL_GAP + (depth - 1) * (NODE_HEIGHT + V_LEVEL_GAP)
+          : rootLayoutY - V_LEVEL_GAP - NODE_HEIGHT - (depth - 1) * (NODE_HEIGHT + V_LEVEL_GAP);
+
+      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: mode });
+
+      if (!collapsedNodeIds.has(nodeId)) {
+        const children = childrenMap.get(nodeId) || [];
+        let cursor = leftEdge;
+        children.forEach((child) => {
+          const childW = buildSubtreeWidth(child.id, childrenMap, collapsedNodeIds);
+          placeSubtree(child.id, cursor, depth + 1);
+          cursor += childW + H_NODE_GAP;
+        });
+      }
+    };
+
+    let cursor = childrenStartX;
+    rootChildren.forEach((child) => {
+      const childW = buildSubtreeWidth(child.id, childrenMap, collapsedNodeIds);
+      placeSubtree(child.id, cursor, 1);
+      cursor += childW + H_NODE_GAP;
+    });
+  });
+
+  return Array.from(positioned.values());
+};
+
+const layoutNodes = (
+  nodes: MindmapNode[],
+  collapsedNodeIds: Set<string>,
+  layoutMode: LayoutMode = "balanced",
+): PositionedNode[] => {
+  const roots = nodes.filter((n) => n.parentId === null);
+  if (roots.length === 0) return [];
+
+  const results: PositionedNode[] = [];
+  for (const root of roots) {
+    const effective = root.nodeLayout ?? layoutMode;
+    if (effective === "down" || effective === "up") {
+      results.push(...layoutNodesVertical(nodes, [root], collapsedNodeIds, effective));
+    } else {
+      results.push(...layoutNodesHorizontal(nodes, [root], collapsedNodeIds, effective));
+    }
+  }
+  return results;
+};
+
+const buildBranchColorMap = (nodes: MindmapNode[]): Map<string, number> => {
+  const map = new Map<string, number>();
+  const childrenMap = groupByParent(nodes);
+  const roots = nodes.filter((n) => n.parentId === null);
+  let colorIdx = 0;
+
+  roots.forEach((root) => {
+    const rootChildren = childrenMap.get(root.id) || [];
+    rootChildren.forEach((child) => {
+      const branchIdx = colorIdx++ % 10;
+      const assignBranch = (id: string) => {
+        map.set(id, branchIdx);
+        (childrenMap.get(id) || []).forEach((c) => assignBranch(c.id));
+      };
+      assignBranch(child.id);
+    });
+  });
+
+  return map;
 };
 
 const clampScale = (nextScale: number): number => Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale));
@@ -179,17 +375,17 @@ export function MindmapCanvas({
   selectedNodeId,
   collapsedNodeIds,
   editable,
+  layoutMode,
   onSelectNode,
   onRenameNode,
   onToggleCollapse,
   onMoveNode,
+  onMoveRootNode,
+  onAddRootNode,
 }: MindmapCanvasProps) {
   const collapsedSet = useMemo(() => new Set(collapsedNodeIds), [collapsedNodeIds]);
   const hiddenSet = useMemo(() => getHiddenByCollapse(nodes, collapsedSet), [nodes, collapsedSet]);
   const visibleNodes = useMemo(() => nodes.filter((node) => !hiddenSet.has(node.id)), [nodes, hiddenSet]);
-
-  const positioned = layoutNodes(visibleNodes, collapsedSet);
-  const byId = new Map(positioned.map((item) => [item.node.id, item]));
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [scale, setScale] = useState(1);
@@ -199,14 +395,47 @@ export function MindmapCanvas({
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string>("");
+  const [rootDragging, setRootDragging] = useState<RootDraggingState | null>(null);
+  const [rootDragOffset, setRootDragOffset] = useState<{ x: number; y: number } | null>(null);
+
   const scaleRef = useRef(1);
   const panRef = useRef({ x: 48, y: 48 });
   const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const offsetRef = useRef({ x: CANVAS_PAD, y: CANVAS_PAD });
+  const rootDraggingRef = useRef(false);
 
-  const maxX = positioned.reduce((m, n) => Math.max(m, n.x + n.width), 0);
-  const maxY = positioned.reduce((m, n) => Math.max(m, n.y + n.height), 0);
-  const width = maxX + 80;
-  const height = maxY + 80;
+  const nodesForLayout = useMemo(() => {
+    if (rootDragging && rootDragOffset) {
+      return visibleNodes.map((n) =>
+        n.id === rootDragging.nodeId
+          ? { ...n, x: rootDragging.startLayoutX + rootDragOffset.x, y: rootDragging.startLayoutY + rootDragOffset.y }
+          : n,
+      );
+    }
+    return visibleNodes;
+  }, [visibleNodes, rootDragging, rootDragOffset]);
+
+  const positioned = useMemo(
+    () => layoutNodes(nodesForLayout, collapsedSet, layoutMode),
+    [nodesForLayout, collapsedSet, layoutMode],
+  );
+
+  const branchColorMap = useMemo(() => buildBranchColorMap(nodes), [nodes]);
+
+  const byId = useMemo(() => new Map(positioned.map((item) => [item.node.id, item])), [positioned]);
+
+  const minX = positioned.length ? Math.min(...positioned.map((n) => n.x)) : 0;
+  const minY = positioned.length ? Math.min(...positioned.map((n) => n.y)) : 0;
+  const maxX = positioned.length ? Math.max(...positioned.map((n) => n.x + n.width)) : 0;
+  const maxY = positioned.length ? Math.max(...positioned.map((n) => n.y + n.height)) : 0;
+
+  const offsetX = Math.max(0, CANVAS_PAD - minX);
+  const offsetY = Math.max(0, CANVAS_PAD - minY);
+  const width = maxX + offsetX + CANVAS_PAD;
+  const height = maxY + offsetY + CANVAS_PAD;
+
+  // Update offsetRef synchronously during render for use in event handlers
+  offsetRef.current = { x: offsetX, y: offsetY };
 
   const positionedByParent = useMemo(() => {
     const map = new Map<string | null, PositionedNode[]>();
@@ -255,6 +484,7 @@ export function MindmapCanvas({
   };
 
   useEffect(() => {
+    if (rootDraggingRef.current) return;
     fitToScreen();
   }, [width, height]);
 
@@ -344,6 +574,27 @@ export function MindmapCanvas({
     lastPointerRef.current = { x: event.clientX, y: event.clientY };
   };
 
+  const handleViewportDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!editable) return;
+
+    const target = event.target as HTMLElement;
+    if (target.closest(".map-node")) return;
+
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const rect = viewport.getBoundingClientRect();
+    const layoutX =
+      (event.clientX - rect.left - panRef.current.x) / scaleRef.current -
+      offsetRef.current.x -
+      ROOT_NODE_WIDTH / 2;
+    const layoutY =
+      (event.clientY - rect.top - panRef.current.y) / scaleRef.current -
+      offsetRef.current.y -
+      ROOT_NODE_HEIGHT / 2;
+    onAddRootNode(layoutX, layoutY);
+  };
+
   const startRename = (nodeId: string, currentTitle: string) => {
     if (!editable) {
       return;
@@ -415,6 +666,16 @@ export function MindmapCanvas({
     onSelectNode(item.node.id);
 
     if (item.node.parentId === null) {
+      // Root drag
+      event.currentTarget.setPointerCapture(event.pointerId);
+      rootDraggingRef.current = true;
+      setRootDragging({
+        nodeId: item.node.id,
+        startLayoutX: item.x,
+        startLayoutY: item.y,
+        startPointerX: event.clientX,
+        startPointerY: event.clientY,
+      });
       return;
     }
 
@@ -432,12 +693,21 @@ export function MindmapCanvas({
       return;
     }
 
+    if (rootDragging) {
+      const deltaX = (event.clientX - rootDragging.startPointerX) / scaleRef.current;
+      const deltaY = (event.clientY - rootDragging.startPointerY) / scaleRef.current;
+      setRootDragOffset({ x: deltaX, y: deltaY });
+      return;
+    }
+
     if (!dragging) {
       return;
     }
 
-    const svgPointY = (event.clientY - panRef.current.y) / scaleRef.current;
-    const siblings = (positionedByParent.get(dragging.parentId) || []).filter((item) => item.node.id !== dragging.nodeId);
+    const svgPointY = (event.clientY - panRef.current.y) / scaleRef.current - offsetRef.current.y;
+    const siblings = (positionedByParent.get(dragging.parentId) || []).filter(
+      (item) => item.node.id !== dragging.nodeId,
+    );
     const nextDropIndex = getSiblingDropIndex(siblings, svgPointY);
 
     setDragging({
@@ -452,12 +722,24 @@ export function MindmapCanvas({
       return;
     }
 
-    if (!dragging) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (rootDragging) {
+      if (rootDragOffset) {
+        const finalX = rootDragging.startLayoutX + rootDragOffset.x;
+        const finalY = rootDragging.startLayoutY + rootDragOffset.y;
+        onMoveRootNode(rootDragging.nodeId, finalX, finalY);
+      }
+      rootDraggingRef.current = false;
+      setRootDragging(null);
+      setRootDragOffset(null);
       return;
     }
 
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+    if (!dragging) {
+      return;
     }
 
     const siblings = positionedByParent.get(dragging.parentId) || [];
@@ -482,8 +764,7 @@ export function MindmapCanvas({
       return null;
     }
 
-    const parent = byId.get(dragging.parentId);
-    const targetX = parent ? parent.x + H_GAP : siblings[0].x;
+    const targetX = siblings[0].x;
 
     if (dropIndex <= 0) {
       return { x: targetX, y: siblings[0].y - V_GAP / 2 };
@@ -542,6 +823,7 @@ export function MindmapCanvas({
         onPointerMove={handleViewportPointerMove}
         onPointerUp={handleViewportPointerUp}
         onPointerCancel={handleViewportPointerUp}
+        onDoubleClick={handleViewportDoubleClick}
       >
         <div
           className="mindmap-transform"
@@ -564,32 +846,79 @@ export function MindmapCanvas({
                   return null;
                 }
 
-                const x1 = parent.x + parent.width;
-                const y1 = parent.y + parent.height / 2;
-                const x2 = item.x;
-                const y2 = item.y + item.height / 2;
-                const c1x = x1 + 40;
-                const c2x = x2 - 40;
+                const branchIdx = branchColorMap.get(item.node.id);
+                const branchClass = branchIdx !== undefined ? ` mindmap-branch--${branchIdx}` : "";
+
+                let d: string;
+                if (item.direction === "down") {
+                  const x1 = parent.x + parent.width / 2 + offsetX;
+                  const y1 = parent.y + parent.height + offsetY;
+                  const x2 = item.x + item.width / 2 + offsetX;
+                  const y2 = item.y + offsetY;
+                  const cy = (y1 + y2) / 2;
+                  d = `M ${x1} ${y1} C ${x1} ${cy}, ${x2} ${cy}, ${x2} ${y2}`;
+                } else if (item.direction === "up") {
+                  const x1 = parent.x + parent.width / 2 + offsetX;
+                  const y1 = parent.y + offsetY;
+                  const x2 = item.x + item.width / 2 + offsetX;
+                  const y2 = item.y + item.height + offsetY;
+                  const cy = (y1 + y2) / 2;
+                  d = `M ${x1} ${y1} C ${x1} ${cy}, ${x2} ${cy}, ${x2} ${y2}`;
+                } else if (item.direction === "left") {
+                  const x1 = parent.x + offsetX;
+                  const y1 = parent.y + parent.height / 2 + offsetY;
+                  const x2 = item.x + item.width + offsetX;
+                  const y2 = item.y + item.height / 2 + offsetY;
+                  d = `M ${x1} ${y1} C ${x1 - 50} ${y1}, ${x2 + 50} ${y2}, ${x2} ${y2}`;
+                } else {
+                  const x1 = parent.x + parent.width + offsetX;
+                  const y1 = parent.y + parent.height / 2 + offsetY;
+                  const x2 = item.x + offsetX;
+                  const y2 = item.y + item.height / 2 + offsetY;
+                  d = `M ${x1} ${y1} C ${x1 + 50} ${y1}, ${x2 - 50} ${y2}, ${x2} ${y2}`;
+                }
 
                 return (
-                  <path key={`edge-${item.node.id}`} d={`M ${x1} ${y1} C ${c1x} ${y1}, ${c2x} ${y2}, ${x2} ${y2}`} />
+                  <path key={`edge-${item.node.id}`} className={`mindmap-edge${branchClass}`} d={d} />
                 );
               })}
 
-              {dropGuide ? <line className="mindmap-drop-guide" x1={dropGuide.x - 80} y1={dropGuide.y} x2={dropGuide.x + 90} y2={dropGuide.y} /> : null}
+              {dropGuide ? (
+                <line
+                  className="mindmap-drop-guide"
+                  x1={dropGuide.x + offsetX - 80}
+                  y1={dropGuide.y + offsetY}
+                  x2={dropGuide.x + offsetX + 90}
+                  y2={dropGuide.y + offsetY}
+                />
+              ) : null}
             </svg>
 
             <div className="mindmap-nodes" style={{ width, height }}>
               {positioned.map((item) => {
                 const hasChildren = nodes.some((node) => node.parentId === item.node.id);
                 const isCollapsed = collapsedSet.has(item.node.id);
-
+                const isRoot = item.direction === "root";
+                const branchIdx = branchColorMap.get(item.node.id);
+                const branchClass = branchIdx !== undefined ? ` mindmap-branch--${branchIdx}` : "";
+                const selectedClass = item.node.id === selectedNodeId ? " map-node--selected" : "";
+                const rootClass = isRoot ? " map-node--root" : "";
                 return (
                   <button
                     key={item.node.id}
                     type="button"
-                    className={item.node.id === selectedNodeId ? "map-node map-node--selected" : "map-node"}
-                    style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
+                    className={`map-node${rootClass}${selectedClass}${branchClass}`}
+                    style={{
+                      left: item.x + offsetX,
+                      top: item.y + offsetY,
+                      width: item.width,
+                      height: item.height,
+                      ...(item.node.borderRadius != null ? { borderRadius: item.node.borderRadius } : {}),
+                      ...(item.node.bgColor ? { backgroundColor: item.node.bgColor } : {}),
+                      ...(item.node.borderWidth != null ? { borderWidth: item.node.borderWidth } : {}),
+                      ...(item.node.borderColor ? { borderColor: item.node.borderColor } : {}),
+                      ...(item.node.textColor ? { color: item.node.textColor } : {}),
+                    }}
                     onDoubleClick={() => startRename(item.node.id, item.node.title)}
                     onPointerDown={(event) => handleNodePointerDown(event, item)}
                     onPointerMove={handleNodePointerMove}

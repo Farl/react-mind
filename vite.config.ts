@@ -16,6 +16,7 @@ export default defineConfig(({ mode }) => {
     base,
     plugins: [react()],
     server: {
+      allowedHosts: [".trycloudflare.com"],
       headers: securityHeaders,
     },
     preview: {

@@ -14,6 +14,7 @@ export default defineConfig(function (_a) {
         base: base,
         plugins: [react()],
         server: {
+            allowedHosts: [".trycloudflare.com"],
             headers: securityHeaders,
         },
         preview: {
