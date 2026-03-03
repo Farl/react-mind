@@ -1,7 +1,16 @@
-export type LayoutMode = "balanced" | "right" | "left" | "down" | "up";
+export type LayoutMode = "balanced" | "right" | "left" | "down" | "up" | "right-aligned" | "left-aligned" | "down-aligned" | "up-aligned";
 
-const LAYOUT_MODES: ReadonlySet<string> = new Set<LayoutMode>(["balanced", "right", "left", "down", "up"]);
+const LAYOUT_MODES: ReadonlySet<string> = new Set<LayoutMode>(["balanced", "right", "left", "down", "up", "right-aligned", "left-aligned", "down-aligned", "up-aligned"]);
 export const isLayoutMode = (v: unknown): v is LayoutMode => typeof v === "string" && LAYOUT_MODES.has(v);
+
+export type EdgeStyle = "curve" | "straight" | "orthogonal" | "rounded";
+export type EdgeEnd = "none" | "arrow" | "dot";
+
+const EDGE_STYLES: ReadonlySet<string> = new Set<EdgeStyle>(["curve", "straight", "orthogonal", "rounded"]);
+export const isEdgeStyle = (v: unknown): v is EdgeStyle => typeof v === "string" && EDGE_STYLES.has(v);
+
+const EDGE_ENDS: ReadonlySet<string> = new Set<EdgeEnd>(["none", "arrow", "dot"]);
+export const isEdgeEnd = (v: unknown): v is EdgeEnd => typeof v === "string" && EDGE_ENDS.has(v);
 
 export type MindmapNode = {
   id: string;
@@ -16,6 +25,10 @@ export type MindmapNode = {
   borderColor?: string;  // CSS color string
   textColor?: string;    // CSS color string
   nodeLayout?: LayoutMode; // overrides global layout for this node's children
+  edgeStyle?: EdgeStyle;   // controls edge FROM parent TO this node (default "curve")
+  edgeEnd?: EdgeEnd;       // end marker (default "none")
+  edgeWidth?: number;      // stroke width (default 2.5)
+  edgeColor?: string;      // override auto branch color
 };
 
 export type MindmapEdge = {

@@ -755,10 +755,11 @@ button:disabled {
 .layout-mode-btns {
   display: flex;
   gap: 4px;
+  flex-wrap: wrap;
 }
 
 .layout-mode-btn {
-  flex: 1;
+  flex: 1 0 28px;
   height: 28px;
   border: 1.5px solid #d1d5db;
   border-radius: 6px;
@@ -839,6 +840,51 @@ button:disabled {
 
 /* Shape picker in inspector */
 .inspector-node {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Collapsible inspector sections */
+.inspector-section {
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.inspector-section:last-child {
+  border-bottom: none;
+}
+
+.inspector-section > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  user-select: none;
+}
+
+.inspector-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.inspector-section > summary::before {
+  content: "";
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  border-left: 5px solid #6b7280;
+  transition: transform 0.15s;
+}
+
+.inspector-section[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.inspector-section__body {
   display: flex;
   flex-direction: column;
   gap: 2px;

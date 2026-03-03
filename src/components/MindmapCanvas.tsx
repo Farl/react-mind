@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { LayoutMode, MindmapNode } from "../domain/mindmap";
+import type { EdgeStyle, LayoutMode, MindmapNode } from "../domain/mindmap";
 import { getDescendantIds } from "../domain/mindmap";
 
 type PositionedNode = {
@@ -10,6 +10,7 @@ type PositionedNode = {
   width: number;
   height: number;
   direction: "left" | "right" | "root" | "down" | "up";
+  aligned?: boolean; // true = tree-chart mode (parent at top, trunk edges)
 };
 
 type MindmapCanvasProps = {
@@ -35,6 +36,9 @@ const ROOT_NODE_HEIGHT = 52;
 const H_GAP = 180;
 const V_GAP = 22;
 const BETWEEN_GAP = H_GAP - NODE_WIDTH; // 10px
+// Tree-chart (aligned) layout uses wider gaps to accommodate the trunk line
+const TREE_BETWEEN_GAP = 42;
+const TREE_H_GAP = NODE_WIDTH + TREE_BETWEEN_GAP; // 212
 const CANVAS_PAD = 80;
 // Vertical layout constants
 const V_LEVEL_GAP = 64; // gap between depth levels (top-to-bottom)
@@ -105,6 +109,51 @@ const computeGroupHeight = (
   return heights.reduce((sum, h) => sum + h, 0) + V_GAP * (nodes.length - 1);
 };
 
+const buildSubtreeHeightAligned = (
+  nodeId: string,
+  childrenMap: Map<string | null, MindmapNode[]>,
+  collapsedNodeIds: Set<string>,
+): number => {
+  if (collapsedNodeIds.has(nodeId)) return NODE_HEIGHT;
+  const children = childrenMap.get(nodeId) || [];
+  if (children.length === 0) return NODE_HEIGHT;
+  const childHeights = children.map((c) => buildSubtreeHeightAligned(c.id, childrenMap, collapsedNodeIds));
+  return NODE_HEIGHT + V_GAP + childHeights.reduce((s, h) => s + h, 0) + V_GAP * (children.length - 1);
+};
+
+const computeGroupHeightAligned = (
+  nodes: MindmapNode[],
+  childrenMap: Map<string | null, MindmapNode[]>,
+  collapsedNodeIds: Set<string>,
+): number => {
+  if (nodes.length === 0) return 0;
+  const heights = nodes.map((n) => buildSubtreeHeightAligned(n.id, childrenMap, collapsedNodeIds));
+  return heights.reduce((s, h) => s + h, 0) + V_GAP * (nodes.length - 1);
+};
+
+const buildSubtreeWidthAligned = (
+  nodeId: string,
+  childrenMap: Map<string | null, MindmapNode[]>,
+  collapsedNodeIds: Set<string>,
+): number => {
+  if (collapsedNodeIds.has(nodeId)) return NODE_WIDTH;
+  const children = childrenMap.get(nodeId) || [];
+  if (children.length === 0) return NODE_WIDTH;
+  const widths = children.map((c) => buildSubtreeWidthAligned(c.id, childrenMap, collapsedNodeIds));
+  const childrenTotal = widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (children.length - 1);
+  return Math.max(NODE_WIDTH, childrenTotal);
+};
+
+const computeGroupWidthAligned = (
+  nodes: MindmapNode[],
+  childrenMap: Map<string | null, MindmapNode[]>,
+  collapsedNodeIds: Set<string>,
+): number => {
+  if (nodes.length === 0) return 0;
+  const widths = nodes.map((n) => buildSubtreeWidthAligned(n.id, childrenMap, collapsedNodeIds));
+  return widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (nodes.length - 1);
+};
+
 const buildSubtreeWidth = (
   nodeId: string,
   childrenMap: Map<string | null, MindmapNode[]>,
@@ -127,11 +176,13 @@ const computeGroupWidth = (
   return widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (nodes.length - 1);
 };
 
+const isAlignedMode = (m: string) => m === "right-aligned" || m === "left-aligned" || m === "down-aligned" || m === "up-aligned";
+
 const layoutNodesHorizontal = (
   nodes: MindmapNode[],
   roots: MindmapNode[],
   collapsedNodeIds: Set<string>,
-  layoutMode: "balanced" | "right" | "left",
+  layoutMode: "balanced" | "right" | "left" | "right-aligned" | "left-aligned",
 ): PositionedNode[] => {
   const childrenMap = groupByParent(nodes);
   const positioned = new Map<string, PositionedNode>();
@@ -146,11 +197,13 @@ const layoutNodesHorizontal = (
     let leftChildren: MindmapNode[];
 
     const effectiveLayout = root.nodeLayout ?? layoutMode;
+    const rootAligned = isAlignedMode(effectiveLayout);
+
     if (effectiveLayout === "balanced" && rootChildren.length > 0) {
       const rightCount = Math.ceil(rootChildren.length / 2);
       rightChildren = rootChildren.slice(0, rightCount);
       leftChildren = rootChildren.slice(rightCount);
-    } else if (effectiveLayout === "left") {
+    } else if (effectiveLayout === "left" || effectiveLayout === "left-aligned") {
       rightChildren = [];
       leftChildren = rootChildren;
     } else {
@@ -167,46 +220,77 @@ const layoutNodesHorizontal = (
       direction: "root",
     });
 
-    const placeSubtree = (nodeId: string, topAbsolute: number, dir: "left" | "right", depth: number): number => {
+    // Selectors for aligned vs centered height calculations
+    const heightFn = (id: string, aligned: boolean) =>
+      aligned
+        ? buildSubtreeHeightAligned(id, childrenMap, collapsedNodeIds)
+        : buildSubtreeHeight(id, childrenMap, collapsedNodeIds);
+
+    const groupHeightFn = (group: MindmapNode[], aligned: boolean) =>
+      aligned
+        ? computeGroupHeightAligned(group, childrenMap, collapsedNodeIds)
+        : computeGroupHeight(group, childrenMap, collapsedNodeIds);
+
+    const placeSubtree = (nodeId: string, topAbsolute: number, dir: "left" | "right", depth: number, aligned: boolean): number => {
       const node = nodes.find((n) => n.id === nodeId);
       if (!node) return 0;
 
-      const subtreeH = buildSubtreeHeight(nodeId, childrenMap, collapsedNodeIds);
-      const y = topAbsolute + subtreeH / 2 - NODE_HEIGHT / 2;
+      // Per-node override: if this node has its own aligned layout, switch
+      const nodeOverride = node.nodeLayout ?? null;
+      let localAligned = aligned;
+      let localDir = dir;
+      if (nodeOverride === "right-aligned") { localAligned = true; localDir = "right"; }
+      else if (nodeOverride === "left-aligned") { localAligned = true; localDir = "left"; }
+      else if (nodeOverride === "right") { localAligned = false; localDir = "right"; }
+      else if (nodeOverride === "left") { localAligned = false; localDir = "left"; }
 
+      const subtreeH = heightFn(nodeId, localAligned);
+      const y = localAligned
+        ? topAbsolute
+        : topAbsolute + subtreeH / 2 - NODE_HEIGHT / 2;
+
+      // Tree-chart uses wider gaps; standard layout uses H_GAP
+      const betweenGap = localAligned ? TREE_BETWEEN_GAP : BETWEEN_GAP;
+      const hGap = localAligned ? TREE_H_GAP : H_GAP;
       const x =
-        dir === "right"
-          ? rootLayoutX + ROOT_NODE_WIDTH + BETWEEN_GAP + (depth - 1) * H_GAP
-          : rootLayoutX - BETWEEN_GAP - NODE_WIDTH - (depth - 1) * H_GAP;
+        localDir === "right"
+          ? rootLayoutX + ROOT_NODE_WIDTH + betweenGap + (depth - 1) * hGap
+          : rootLayoutX - betweenGap - NODE_WIDTH - (depth - 1) * hGap;
 
-      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: dir });
+      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: localDir, aligned: localAligned });
 
       if (!collapsedNodeIds.has(nodeId)) {
         const children = childrenMap.get(nodeId) || [];
-        const effectiveLayout = node.nodeLayout ?? null;
 
-        if (effectiveLayout === "balanced" && children.length > 0) {
+        if (nodeOverride === "balanced" && children.length > 0) {
           const rightCount = Math.ceil(children.length / 2);
           const rightKids = children.slice(0, rightCount);
           const leftKids = children.slice(rightCount);
-          const rightGroupH = computeGroupHeight(rightKids, childrenMap, collapsedNodeIds);
-          let cursor = topAbsolute + subtreeH / 2 - rightGroupH / 2;
+          const rightGroupH = groupHeightFn(rightKids, localAligned);
+          let cursor = localAligned
+            ? topAbsolute + NODE_HEIGHT + V_GAP
+            : topAbsolute + subtreeH / 2 - rightGroupH / 2;
           rightKids.forEach((child) => {
-            const h = placeSubtree(child.id, cursor, "right", depth + 1);
+            const h = placeSubtree(child.id, cursor, "right", depth + 1, localAligned);
             cursor += h + V_GAP;
           });
-          const leftGroupH = computeGroupHeight(leftKids, childrenMap, collapsedNodeIds);
-          cursor = topAbsolute + subtreeH / 2 - leftGroupH / 2;
+          const leftGroupH = groupHeightFn(leftKids, localAligned);
+          cursor = localAligned
+            ? topAbsolute + NODE_HEIGHT + V_GAP + rightGroupH + (rightKids.length > 0 ? V_GAP : 0)
+            : topAbsolute + subtreeH / 2 - leftGroupH / 2;
           leftKids.forEach((child) => {
-            const h = placeSubtree(child.id, cursor, "left", depth + 1);
+            const h = placeSubtree(child.id, cursor, "left", depth + 1, localAligned);
             cursor += h + V_GAP;
           });
         } else {
           const childDir: "left" | "right" =
-            effectiveLayout === "right" ? "right" : effectiveLayout === "left" ? "left" : dir;
-          let cursor = topAbsolute;
+            nodeOverride === "right" || nodeOverride === "right-aligned" ? "right"
+            : nodeOverride === "left" || nodeOverride === "left-aligned" ? "left"
+            : localDir;
+          const childAligned = isAlignedMode(nodeOverride ?? "") ? true : localAligned;
+          let cursor = localAligned ? topAbsolute + NODE_HEIGHT + V_GAP : topAbsolute;
           children.forEach((child) => {
-            const h = placeSubtree(child.id, cursor, childDir, depth + 1);
+            const h = placeSubtree(child.id, cursor, childDir, depth + 1, childAligned);
             cursor += h + V_GAP;
           });
         }
@@ -215,17 +299,22 @@ const layoutNodesHorizontal = (
       return subtreeH;
     };
 
-    const rightGroupH = computeGroupHeight(rightChildren, childrenMap, collapsedNodeIds);
-    let cursor = rootLayoutY + ROOT_NODE_HEIGHT / 2 - rightGroupH / 2;
+    const rightGroupH = groupHeightFn(rightChildren, rootAligned);
+    let cursor = rootAligned
+      ? rootLayoutY + ROOT_NODE_HEIGHT + V_GAP
+      : rootLayoutY + ROOT_NODE_HEIGHT / 2 - rightGroupH / 2;
     rightChildren.forEach((child) => {
-      const h = placeSubtree(child.id, cursor, "right", 1);
+      const h = placeSubtree(child.id, cursor, "right", 1, rootAligned);
       cursor += h + V_GAP;
     });
 
-    const leftGroupH = computeGroupHeight(leftChildren, childrenMap, collapsedNodeIds);
-    cursor = rootLayoutY + ROOT_NODE_HEIGHT / 2 - leftGroupH / 2;
+    const leftGroupH = groupHeightFn(leftChildren, rootAligned);
+    if (!rootAligned) {
+      cursor = rootLayoutY + ROOT_NODE_HEIGHT / 2 - leftGroupH / 2;
+    }
+    // If rootAligned, cursor already continues from right children
     leftChildren.forEach((child) => {
-      const h = placeSubtree(child.id, cursor, "left", 1);
+      const h = placeSubtree(child.id, cursor, "left", 1, rootAligned);
       cursor += h + V_GAP;
     });
   });
@@ -233,23 +322,40 @@ const layoutNodesHorizontal = (
   return Array.from(positioned.values());
 };
 
+const isAlignedVertical = (m: string) => m === "down-aligned" || m === "up-aligned";
+
 const layoutNodesVertical = (
   nodes: MindmapNode[],
   roots: MindmapNode[],
   collapsedNodeIds: Set<string>,
-  mode: "down" | "up",
+  mode: "down" | "up" | "down-aligned" | "up-aligned",
 ): PositionedNode[] => {
   const childrenMap = groupByParent(nodes);
   const positioned = new Map<string, PositionedNode>();
+  const baseDir: "down" | "up" = mode === "down" || mode === "down-aligned" ? "down" : "up";
+  const rootAligned = isAlignedVertical(mode);
+
+  const widthFn = (id: string, aligned: boolean) =>
+    aligned
+      ? buildSubtreeWidthAligned(id, childrenMap, collapsedNodeIds)
+      : buildSubtreeWidth(id, childrenMap, collapsedNodeIds);
+
+  const groupWidthFn = (group: MindmapNode[], aligned: boolean) =>
+    aligned
+      ? computeGroupWidthAligned(group, childrenMap, collapsedNodeIds)
+      : computeGroupWidth(group, childrenMap, collapsedNodeIds);
 
   roots.forEach((root, rootIdx) => {
     const rootLayoutX = root.x ?? rootIdx * 800;
     const rootLayoutY = root.y ?? 200;
 
     const rootChildren = childrenMap.get(root.id) || [];
-    const totalChildrenWidth = computeGroupWidth(rootChildren, childrenMap, collapsedNodeIds);
-    const childrenStartX =
-      rootChildren.length > 0 ? rootLayoutX + ROOT_NODE_WIDTH / 2 - totalChildrenWidth / 2 : rootLayoutX;
+    const totalChildrenWidth = groupWidthFn(rootChildren, rootAligned);
+    const childrenStartX = rootAligned
+      ? rootLayoutX
+      : rootChildren.length > 0
+        ? rootLayoutX + ROOT_NODE_WIDTH / 2 - totalChildrenWidth / 2
+        : rootLayoutX;
 
     positioned.set(root.id, {
       node: root,
@@ -260,25 +366,31 @@ const layoutNodesVertical = (
       direction: "root",
     });
 
-    const placeSubtree = (nodeId: string, leftEdge: number, depth: number): void => {
+    const placeSubtree = (nodeId: string, leftEdge: number, depth: number, aligned: boolean): void => {
       const node = nodes.find((n) => n.id === nodeId);
       if (!node) return;
 
-      const sw = buildSubtreeWidth(nodeId, childrenMap, collapsedNodeIds);
-      const x = leftEdge + sw / 2 - NODE_WIDTH / 2;
+      // Per-node override
+      let localAligned = aligned;
+      const nodeOverride = node.nodeLayout ?? null;
+      if (nodeOverride === "down-aligned" || nodeOverride === "up-aligned") localAligned = true;
+      else if (nodeOverride === "down" || nodeOverride === "up") localAligned = false;
+
+      const sw = widthFn(nodeId, localAligned);
+      const x = localAligned ? leftEdge : leftEdge + sw / 2 - NODE_WIDTH / 2;
       const y =
-        mode === "down"
+        baseDir === "down"
           ? rootLayoutY + ROOT_NODE_HEIGHT + V_LEVEL_GAP + (depth - 1) * (NODE_HEIGHT + V_LEVEL_GAP)
           : rootLayoutY - V_LEVEL_GAP - NODE_HEIGHT - (depth - 1) * (NODE_HEIGHT + V_LEVEL_GAP);
 
-      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: mode });
+      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: baseDir, aligned: localAligned });
 
       if (!collapsedNodeIds.has(nodeId)) {
         const children = childrenMap.get(nodeId) || [];
         let cursor = leftEdge;
         children.forEach((child) => {
-          const childW = buildSubtreeWidth(child.id, childrenMap, collapsedNodeIds);
-          placeSubtree(child.id, cursor, depth + 1);
+          const childW = widthFn(child.id, localAligned);
+          placeSubtree(child.id, cursor, depth + 1, localAligned);
           cursor += childW + H_NODE_GAP;
         });
       }
@@ -286,8 +398,8 @@ const layoutNodesVertical = (
 
     let cursor = childrenStartX;
     rootChildren.forEach((child) => {
-      const childW = buildSubtreeWidth(child.id, childrenMap, collapsedNodeIds);
-      placeSubtree(child.id, cursor, 1);
+      const childW = widthFn(child.id, rootAligned);
+      placeSubtree(child.id, cursor, 1, rootAligned);
       cursor += childW + H_NODE_GAP;
     });
   });
@@ -306,10 +418,10 @@ const layoutNodes = (
   const results: PositionedNode[] = [];
   for (const root of roots) {
     const effective = root.nodeLayout ?? layoutMode;
-    if (effective === "down" || effective === "up") {
+    if (effective === "down" || effective === "up" || effective === "down-aligned" || effective === "up-aligned") {
       results.push(...layoutNodesVertical(nodes, [root], collapsedNodeIds, effective));
     } else {
-      results.push(...layoutNodesHorizontal(nodes, [root], collapsedNodeIds, effective));
+      results.push(...layoutNodesHorizontal(nodes, [root], collapsedNodeIds, effective as "balanced" | "right" | "left" | "right-aligned" | "left-aligned"));
     }
   }
   return results;
@@ -336,11 +448,8 @@ const buildBranchColorMap = (nodes: MindmapNode[]): Map<string, number> => {
   return map;
 };
 
-const buildEdgePath = (
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
+const buildEdgePathCurve = (
+  x1: number, y1: number, x2: number, y2: number,
   direction: PositionedNode["direction"],
 ): string => {
   if (direction === "down") {
@@ -358,10 +467,118 @@ const buildEdgePath = (
     const cp = Math.max(20, dx * 0.4);
     return `M ${x1} ${y1} C ${x1 - cp} ${y1}, ${x2 + cp} ${y2}, ${x2} ${y2}`;
   }
-  // right
   const dx = Math.abs(x2 - x1);
   const cp = Math.max(20, dx * 0.4);
   return `M ${x1} ${y1} C ${x1 + cp} ${y1}, ${x2 - cp} ${y2}, ${x2} ${y2}`;
+};
+
+const buildEdgePathStraight = (
+  x1: number, y1: number, x2: number, y2: number,
+): string => `M ${x1} ${y1} L ${x2} ${y2}`;
+
+const buildEdgePathOrthogonal = (
+  x1: number, y1: number, x2: number, y2: number,
+  direction: PositionedNode["direction"],
+): string => {
+  const isVertical = direction === "down" || direction === "up";
+  if (isVertical) {
+    if (Math.abs(x2 - x1) < 1) return `M ${x1} ${y1} L ${x2} ${y2}`;
+    const midY = (y1 + y2) / 2;
+    return `M ${x1} ${y1} V ${midY} H ${x2} V ${y2}`;
+  }
+  if (Math.abs(y2 - y1) < 1) return `M ${x1} ${y1} L ${x2} ${y2}`;
+  const midX = (x1 + x2) / 2;
+  return `M ${x1} ${y1} H ${midX} V ${y2} H ${x2}`;
+};
+
+const buildEdgePathRounded = (
+  x1: number, y1: number, x2: number, y2: number,
+  direction: PositionedNode["direction"],
+): string => {
+  const isVertical = direction === "down" || direction === "up";
+  if (isVertical) {
+    const dx = Math.abs(x2 - x1);
+    const dy = Math.abs(y2 - y1);
+    if (dx < 1) return `M ${x1} ${y1} L ${x2} ${y2}`;
+    const r = Math.min(8, dx / 2, dy / 2);
+    if (r < 1) return buildEdgePathOrthogonal(x1, y1, x2, y2, direction);
+    const midY = (y1 + y2) / 2;
+    const sx = x2 > x1 ? 1 : -1;
+    const sy = y2 > y1 ? 1 : -1;
+    return `M ${x1} ${y1} V ${midY - r * sy} Q ${x1} ${midY} ${x1 + r * sx} ${midY} H ${x2 - r * sx} Q ${x2} ${midY} ${x2} ${midY + r * sy} V ${y2}`;
+  }
+  const dx = Math.abs(x2 - x1);
+  const dy = Math.abs(y2 - y1);
+  if (dy < 1) return `M ${x1} ${y1} L ${x2} ${y2}`;
+  const r = Math.min(8, dx / 2, dy / 2);
+  if (r < 1) return buildEdgePathOrthogonal(x1, y1, x2, y2, direction);
+  const midX = (x1 + x2) / 2;
+  const sx = x2 > x1 ? 1 : -1;
+  const sy = y2 > y1 ? 1 : -1;
+  return `M ${x1} ${y1} H ${midX - r * sx} Q ${midX} ${y1} ${midX} ${y1 + r * sy} V ${y2 - r * sy} Q ${midX} ${y2} ${midX + r * sx} ${y2} H ${x2}`;
+};
+
+/** Tree-chart trunk edge: trunk close to parent, branches to children with rounded corners. */
+const buildEdgePathTree = (
+  x1: number, y1: number, x2: number, y2: number,
+  direction: PositionedNode["direction"],
+): string => {
+  const dy = y2 - y1;
+  const dx = x2 - x1;
+  if (Math.abs(dy) < 1 && Math.abs(dx) < 1) return `M ${x1} ${y1}`;
+
+  const isVertical = direction === "down" || direction === "up";
+
+  if (isVertical) {
+    // Horizontal trunk: M x1,y1 → V trunkY → H x2 → V y2
+    const trunkY = y1 + dy / 3;
+    const r = Math.min(6, Math.abs(dx) / 2, Math.abs(dy) / 6);
+    if (r < 1 || Math.abs(dx) < 1) {
+      return `M ${x1} ${y1} V ${trunkY} H ${x2} V ${y2}`;
+    }
+    const sy = dy > 0 ? 1 : -1;
+    const sx = dx > 0 ? 1 : -1;
+    return [
+      `M ${x1} ${y1}`,
+      `V ${trunkY - r * sy}`,
+      `Q ${x1} ${trunkY} ${x1 + r * sx} ${trunkY}`,
+      `H ${x2 - r * sx}`,
+      `Q ${x2} ${trunkY} ${x2} ${trunkY + r * sy}`,
+      `V ${y2}`,
+    ].join(" ");
+  }
+
+  // Horizontal: vertical trunk: M x1,y1 → H trunkX → V y2 → H x2
+  const trunkX = x1 + dx / 3;
+  const r = Math.min(6, Math.abs(dy) / 2, Math.abs(dx) / 6);
+  if (r < 1 || Math.abs(dy) < 1) {
+    return `M ${x1} ${y1} H ${trunkX} V ${y2} H ${x2}`;
+  }
+  const sy = dy > 0 ? 1 : -1;
+  const sx = dx > 0 ? 1 : -1;
+  return [
+    `M ${x1} ${y1}`,
+    `H ${trunkX - r * sx}`,
+    `Q ${trunkX} ${y1} ${trunkX} ${y1 + r * sy}`,
+    `V ${y2 - r * sy}`,
+    `Q ${trunkX} ${y2} ${trunkX + r * sx} ${y2}`,
+    `H ${x2}`,
+  ].join(" ");
+};
+
+const buildEdgePath = (
+  x1: number, y1: number, x2: number, y2: number,
+  direction: PositionedNode["direction"],
+  style: EdgeStyle = "curve",
+  treeMode = false,
+): string => {
+  if (treeMode) return buildEdgePathTree(x1, y1, x2, y2, direction);
+  switch (style) {
+    case "straight": return buildEdgePathStraight(x1, y1, x2, y2);
+    case "orthogonal": return buildEdgePathOrthogonal(x1, y1, x2, y2, direction);
+    case "rounded": return buildEdgePathRounded(x1, y1, x2, y2, direction);
+    default: return buildEdgePathCurve(x1, y1, x2, y2, direction);
+  }
 };
 
 const clampScale = (nextScale: number): number => Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale));
@@ -618,7 +835,7 @@ export function MindmapCanvas({
       return;
     }
 
-    if (event.button !== 0 || !viewportRef.current) {
+    if (!viewportRef.current) {
       return;
     }
 
@@ -627,19 +844,25 @@ export function MindmapCanvas({
       return;
     }
 
-    viewportRef.current.setPointerCapture(event.pointerId);
-
-    if (event.shiftKey) {
-      const rect = viewportRef.current.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      setMarquee({ startX: x, startY: y, currentX: x, currentY: y });
+    // Right-click (or ctrl+click) → pan
+    if (event.button === 2) {
+      viewportRef.current.setPointerCapture(event.pointerId);
+      setIsPanning(true);
+      lastPointerRef.current = { x: event.clientX, y: event.clientY };
+      panMovedRef.current = false;
       return;
     }
 
-    setIsPanning(true);
-    lastPointerRef.current = { x: event.clientX, y: event.clientY };
-    panMovedRef.current = false;
+    if (event.button !== 0) {
+      return;
+    }
+
+    // Left-click on empty canvas → marquee select
+    viewportRef.current.setPointerCapture(event.pointerId);
+    const rect = viewportRef.current.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    setMarquee({ startX: x, startY: y, currentX: x, currentY: y });
   };
 
   const handleViewportDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -736,6 +959,16 @@ export function MindmapCanvas({
     }
 
     if (marquee) {
+      const dx = Math.abs(marquee.currentX - marquee.startX);
+      const dy = Math.abs(marquee.currentY - marquee.startY);
+
+      // Tiny drag = just a click on empty canvas → deselect
+      if (dx < 4 && dy < 4) {
+        onSelectNode(null);
+        setMarquee(null);
+        return;
+      }
+
       const s = scaleRef.current;
       const p = panRef.current;
       const off = offsetRef.current;
@@ -759,10 +992,6 @@ export function MindmapCanvas({
       }
       setMarquee(null);
       return;
-    }
-
-    if (!panMovedRef.current && isPanning) {
-      onSelectNode(null);
     }
 
     setIsPanning(false);
@@ -979,6 +1208,7 @@ export function MindmapCanvas({
         onPointerUp={handleViewportPointerUp}
         onPointerCancel={handleViewportPointerUp}
         onDoubleClick={handleViewportDoubleClick}
+        onContextMenu={(e) => e.preventDefault()}
       >
         <div
           className="mindmap-transform"
@@ -991,6 +1221,14 @@ export function MindmapCanvas({
         >
           <div className="mindmap-wrap">
             <svg className="mindmap-lines" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
+              <defs>
+                <marker id="edge-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse" markerUnits="strokeWidth">
+                  <path d="M 0 0 L 8 4 L 0 8 Z" fill="context-stroke" />
+                </marker>
+                <marker id="edge-dot" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto" markerUnits="strokeWidth">
+                  <circle cx="3" cy="3" r="3" fill="context-stroke" />
+                </marker>
+              </defs>
               {positioned.map((item) => {
                 if (!item.node.parentId) {
                   return null;
@@ -1026,10 +1264,28 @@ export function MindmapCanvas({
                   x2 = item.x + offsetX;
                   y2 = item.y + item.height / 2 + offsetY;
                 }
-                const d = buildEdgePath(x1, y1, x2, y2, item.direction);
+
+                const edgeStyle = item.node.edgeStyle ?? "curve";
+                const edgeEnd = item.node.edgeEnd ?? "none";
+                const treeMode = item.aligned === true;
+                const d = buildEdgePath(x1, y1, x2, y2, item.direction, edgeStyle, treeMode);
+
+                const inlineStyle: React.CSSProperties = {};
+                if (item.node.edgeWidth != null) inlineStyle.strokeWidth = item.node.edgeWidth;
+                if (item.node.edgeColor) inlineStyle.stroke = item.node.edgeColor;
+
+                const markerEnd = edgeEnd === "arrow" ? "url(#edge-arrow)"
+                  : edgeEnd === "dot" ? "url(#edge-dot)"
+                  : undefined;
 
                 return (
-                  <path key={`edge-${item.node.id}`} className={`mindmap-edge${branchClass}`} d={d} />
+                  <path
+                    key={`edge-${item.node.id}`}
+                    className={`mindmap-edge${branchClass}`}
+                    d={d}
+                    style={inlineStyle}
+                    markerEnd={markerEnd}
+                  />
                 );
               })}
 

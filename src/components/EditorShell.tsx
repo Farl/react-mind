@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
-import type { LayoutMode } from "../domain/mindmap";
+import type { EdgeEnd, EdgeStyle, LayoutMode, MindmapNode } from "../domain/mindmap";
 import { isLayoutMode } from "../domain/mindmap";
 import { useMindmapEditor } from "../hooks/useMindmapEditor";
 import { googleSheetsService } from "../services/googleSheets/client";
@@ -1138,326 +1138,289 @@ export function EditorShell({ appName }: EditorShellProps) {
             </button>
           </div>
 
-          {editor.selectedNodes.length > 1 ? (() => {
+          {editor.selectedNodes.length > 0 ? (() => {
             const nodes = editor.selectedNodes;
-            const commonRadius = nodes.every((n) => (n.borderRadius ?? 8) === (nodes[0].borderRadius ?? 8)) ? (nodes[0].borderRadius ?? 8) : null;
-            const commonBg = nodes.every((n) => (n.bgColor ?? "") === (nodes[0].bgColor ?? "")) ? (nodes[0].bgColor ?? "") : null;
-            const commonBorderW = nodes.every((n) => (n.borderWidth ?? 1) === (nodes[0].borderWidth ?? 1)) ? (nodes[0].borderWidth ?? 1) : null;
-            const commonBorderC = nodes.every((n) => (n.borderColor ?? "") === (nodes[0].borderColor ?? "")) ? (nodes[0].borderColor ?? "") : null;
-            const commonText = nodes.every((n) => (n.textColor ?? "") === (nodes[0].textColor ?? "")) ? (nodes[0].textColor ?? "") : null;
+            const isSingle = nodes.length === 1;
+            const node = isSingle ? nodes[0] : null;
+
+            const allSame = <T,>(fn: (n: MindmapNode) => T): T | null =>
+              nodes.every((n) => fn(n) === fn(nodes[0])) ? fn(nodes[0]) : null;
+
+            const commonRadius = allSame((n) => n.borderRadius ?? 8);
+            const commonBg = allSame((n) => n.bgColor ?? "");
+            const commonBorderW = allSame((n) => n.borderWidth ?? 1);
+            const commonBorderC = allSame((n) => n.borderColor ?? "");
+            const commonText = allSame((n) => n.textColor ?? "");
+            const commonLayout = allSame((n) => n.nodeLayout ?? "");
+            const commonEdgeStyle = allSame((n) => n.edgeStyle ?? "curve") as EdgeStyle | null;
+            const commonEdgeEnd = allSame((n) => n.edgeEnd ?? "none") as EdgeEnd | null;
+            const commonEdgeWidth = allSame((n) => n.edgeWidth ?? 2.5);
+            const commonEdgeColor = allSame((n) => n.edgeColor ?? "");
+
             const applyStyle = (style: Parameters<typeof editor.updateMultipleNodeStyles>[1]) =>
-              editor.updateMultipleNodeStyles(editor.selectedNodeIds, style);
+              isSingle
+                ? editor.updateNodeStyle(node!.id, style)
+                : editor.updateMultipleNodeStyles(editor.selectedNodeIds, style);
 
             return (
               <div className="inspector-node">
-                <p style={{ fontWeight: 600, fontSize: 14, margin: "0 0 8px" }}>
-                  {nodes.length} nodes selected
-                </p>
+                {isSingle ? (
+                  <InspectorTitle
+                    key={node!.id}
+                    nodeId={node!.id}
+                    title={node!.title}
+                    onCommit={editor.renameNode}
+                  />
+                ) : (
+                  <p style={{ fontWeight: 600, fontSize: 14, margin: "0 0 4px" }}>
+                    {nodes.length} nodes selected
+                  </p>
+                )}
 
-                <div className="inspector-row">
-                  <label className="inspector-label">Radius</label>
-                  <div className="layout-mode-btns">
-                    {(
-                      [
-                        { value: 0, icon: "crop_square", title: "Sharp" },
-                        { value: 8, icon: "rounded_corner", title: "Rounded" },
-                        { value: 999, icon: "circle", title: "Pill" },
-                      ] as const
-                    ).map(({ value, icon, title }) => (
+                {/* Shape */}
+                <details className="inspector-section" open>
+                  <summary>Shape</summary>
+                  <div className="inspector-section__body">
+                    <div className="inspector-row">
+                      <label className="inspector-label">Radius</label>
+                      <div className="layout-mode-btns">
+                        {(
+                          [
+                            { value: 0, icon: "crop_square", title: "Sharp" },
+                            { value: 8, icon: "rounded_corner", title: "Rounded" },
+                            { value: 999, icon: "circle", title: "Pill" },
+                          ] as const
+                        ).map(({ value, icon, title }) => (
+                          <button
+                            key={value}
+                            type="button"
+                            title={title}
+                            className={`layout-mode-btn${commonRadius === value ? " layout-mode-btn--active" : ""}`}
+                            onClick={() => applyStyle({ borderRadius: value === 8 ? undefined : value })}
+                          >
+                            <span className="material-symbols-rounded">{icon}</span>
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="number"
+                        min={0}
+                        max={999}
+                        value={commonRadius ?? ""}
+                        placeholder={isSingle ? undefined : "-"}
+                        style={{ width: 52 }}
+                        onChange={(e) => applyStyle({ borderRadius: Number(e.target.value) === 8 ? undefined : Number(e.target.value) })}
+                      />
+                    </div>
+
+                    <div className="inspector-row">
+                      <label className="inspector-label">Fill</label>
                       <button
-                        key={value}
                         type="button"
-                        title={title}
-                        className={`layout-mode-btn${commonRadius === value ? " layout-mode-btn--active" : ""}`}
-                        onClick={() => applyStyle({ borderRadius: value === 8 ? undefined : value })}
+                        className={`inspector-preset-btn${commonBg === "transparent" ? " inspector-preset-btn--active" : ""}`}
+                        title="No fill (transparent)"
+                        onClick={() => applyStyle({ bgColor: "transparent" })}
                       >
-                        <span className="material-symbols-rounded">{icon}</span>
+                        <span className="material-symbols-rounded">block</span>
                       </button>
-                    ))}
-                  </div>
-                  <input
-                    type="number"
-                    min={0}
-                    max={999}
-                    value={commonRadius ?? ""}
-                    placeholder="-"
-                    style={{ width: 52 }}
-                    onChange={(e) => applyStyle({ borderRadius: Number(e.target.value) === 8 ? undefined : Number(e.target.value) })}
-                  />
-                </div>
+                      <input
+                        type="color"
+                        value={commonBg && commonBg !== "transparent" ? commonBg : "#ffffff"}
+                        onChange={(e) => applyStyle({ bgColor: e.target.value })}
+                      />
+                      <button type="button" className="inspector-clear" title="Reset to theme default" onClick={() => applyStyle({ bgColor: undefined })}>
+                        <span className="material-symbols-rounded">restart_alt</span>
+                      </button>
+                    </div>
 
-                <div className="inspector-row">
-                  <label className="inspector-label">Fill</label>
-                  <button
-                    type="button"
-                    className={`inspector-preset-btn${commonBg === "transparent" ? " inspector-preset-btn--active" : ""}`}
-                    title="No fill (transparent)"
-                    onClick={() => applyStyle({ bgColor: "transparent" })}
-                  >
-                    <span className="material-symbols-rounded">block</span>
-                  </button>
-                  <input
-                    type="color"
-                    value={commonBg && commonBg !== "transparent" ? commonBg : "#ffffff"}
-                    onChange={(e) => applyStyle({ bgColor: e.target.value })}
-                  />
-                  <button type="button" className="inspector-clear" title="Reset to theme default" onClick={() => applyStyle({ bgColor: undefined })}>
-                    <span className="material-symbols-rounded">restart_alt</span>
-                  </button>
-                </div>
-
-                <div className="inspector-row">
-                  <label className="inspector-label">Border</label>
-                  <button
-                    type="button"
-                    className={`inspector-preset-btn${commonBorderW === 0 ? " inspector-preset-btn--active" : ""}`}
-                    title="No border"
-                    onClick={() => applyStyle({ borderWidth: 0, borderColor: undefined })}
-                  >
-                    <span className="material-symbols-rounded">block</span>
-                  </button>
-                  <input
-                    type="number"
-                    min={0}
-                    max={16}
-                    value={commonBorderW ?? ""}
-                    placeholder="-"
-                    style={{ width: 52 }}
-                    onChange={(e) => applyStyle({ borderWidth: Number(e.target.value) })}
-                  />
-                  <input
-                    type="color"
-                    value={commonBorderC || "#6b7280"}
-                    onChange={(e) => applyStyle({ borderColor: e.target.value })}
-                  />
-                  <button type="button" className="inspector-clear" title="Reset to default" onClick={() => applyStyle({ borderWidth: undefined, borderColor: undefined })}>
-                    <span className="material-symbols-rounded">restart_alt</span>
-                  </button>
-                </div>
-
-                <div className="inspector-row">
-                  <label className="inspector-label">Text</label>
-                  <input
-                    type="color"
-                    value={commonText || "#111827"}
-                    onChange={(e) => applyStyle({ textColor: e.target.value })}
-                  />
-                  <button type="button" className="inspector-clear" title="Reset to default" onClick={() => applyStyle({ textColor: undefined })}>
-                    <span className="material-symbols-rounded">restart_alt</span>
-                  </button>
-                </div>
-
-                <div className="inspector-row">
-                  <label className="inspector-label">Layout</label>
-                  <div className="layout-mode-btns">
-                    {(
-                      [
-                        { value: "", icon: "remove", title: "Inherit" },
-                        { value: "balanced", icon: "hub", title: "Balanced" },
-                        { value: "right", icon: "east", title: "Right" },
-                        { value: "left", icon: "west", title: "Left" },
-                        { value: "down", icon: "south", title: "Down" },
-                        { value: "up", icon: "north", title: "Up" },
-                      ] as const
-                    ).map(({ value, icon, title }) => (
+                    <div className="inspector-row">
+                      <label className="inspector-label">Border</label>
                       <button
-                        key={value}
                         type="button"
-                        title={title}
-                        className="layout-mode-btn"
-                        onClick={() => applyStyle({ nodeLayout: (value as LayoutMode) || undefined })}
+                        className={`inspector-preset-btn${commonBorderW === 0 ? " inspector-preset-btn--active" : ""}`}
+                        title="No border"
+                        onClick={() => applyStyle({ borderWidth: 0, borderColor: undefined })}
                       >
-                        <span className="material-symbols-rounded">{icon}</span>
+                        <span className="material-symbols-rounded">block</span>
                       </button>
-                    ))}
+                      <input
+                        type="number"
+                        min={0}
+                        max={16}
+                        value={commonBorderW ?? ""}
+                        placeholder={isSingle ? undefined : "-"}
+                        style={{ width: 52 }}
+                        onChange={(e) => applyStyle({ borderWidth: Number(e.target.value) })}
+                      />
+                      <input
+                        type="color"
+                        value={commonBorderC || "#6b7280"}
+                        onChange={(e) => applyStyle({ borderColor: e.target.value })}
+                      />
+                      <button type="button" className="inspector-clear" title="Reset to default" onClick={() => applyStyle({ borderWidth: undefined, borderColor: undefined })}>
+                        <span className="material-symbols-rounded">restart_alt</span>
+                      </button>
+                    </div>
                   </div>
-                </div>
+                </details>
+
+                {/* Text */}
+                <details className="inspector-section" open>
+                  <summary>Text</summary>
+                  <div className="inspector-section__body">
+                    <div className="inspector-row">
+                      <label className="inspector-label">Color</label>
+                      <input
+                        type="color"
+                        value={commonText || "#111827"}
+                        onChange={(e) => applyStyle({ textColor: e.target.value })}
+                      />
+                      <button type="button" className="inspector-clear" title="Reset to default" onClick={() => applyStyle({ textColor: undefined })}>
+                        <span className="material-symbols-rounded">restart_alt</span>
+                      </button>
+                    </div>
+                  </div>
+                </details>
+
+                {/* Branch */}
+                <details className="inspector-section" open>
+                  <summary>Branch</summary>
+                  <div className="inspector-section__body">
+                    <div className="inspector-row">
+                      <label className="inspector-label">Style</label>
+                      <div className="layout-mode-btns">
+                        {(
+                          [
+                            { value: "curve" as EdgeStyle, icon: "gesture", title: "Curve" },
+                            { value: "straight" as EdgeStyle, icon: "trending_flat", title: "Straight" },
+                            { value: "orthogonal" as EdgeStyle, icon: "polyline", title: "Orthogonal" },
+                            { value: "rounded" as EdgeStyle, icon: "rounded_corner", title: "Rounded" },
+                          ]
+                        ).map(({ value, icon, title }) => (
+                          <button
+                            key={value}
+                            type="button"
+                            title={title}
+                            className={`layout-mode-btn${commonEdgeStyle === value ? " layout-mode-btn--active" : ""}`}
+                            onClick={() => applyStyle({ edgeStyle: value === "curve" ? undefined : value })}
+                          >
+                            <span className="material-symbols-rounded">{icon}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="inspector-row">
+                      <label className="inspector-label">End</label>
+                      <div className="layout-mode-btns">
+                        {(
+                          [
+                            { value: "none" as EdgeEnd, icon: "remove", title: "None" },
+                            { value: "arrow" as EdgeEnd, icon: "arrow_right_alt", title: "Arrow" },
+                            { value: "dot" as EdgeEnd, icon: "circle", title: "Dot" },
+                          ]
+                        ).map(({ value, icon, title }) => (
+                          <button
+                            key={value}
+                            type="button"
+                            title={title}
+                            className={`layout-mode-btn${commonEdgeEnd === value ? " layout-mode-btn--active" : ""}`}
+                            onClick={() => applyStyle({ edgeEnd: value === "none" ? undefined : value })}
+                          >
+                            <span className="material-symbols-rounded">{icon}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="inspector-row">
+                      <label className="inspector-label">Width</label>
+                      <div className="layout-mode-btns">
+                        {(
+                          [
+                            { value: 1.5, label: "Thin" },
+                            { value: 2.5, label: "Med" },
+                            { value: 4, label: "Bold" },
+                          ]
+                        ).map(({ value, label }) => (
+                          <button
+                            key={value}
+                            type="button"
+                            title={`${label} (${value}px)`}
+                            className={`inspector-preset-btn${commonEdgeWidth === value ? " inspector-preset-btn--active" : ""}`}
+                            onClick={() => applyStyle({ edgeWidth: value === 2.5 ? undefined : value })}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={12}
+                        step={0.5}
+                        value={commonEdgeWidth ?? ""}
+                        placeholder={isSingle ? undefined : "-"}
+                        style={{ width: 52 }}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          applyStyle({ edgeWidth: v === 2.5 ? undefined : v });
+                        }}
+                      />
+                    </div>
+
+                    <div className="inspector-row">
+                      <label className="inspector-label">Color</label>
+                      <input
+                        type="color"
+                        value={commonEdgeColor || "#93c5fd"}
+                        onChange={(e) => applyStyle({ edgeColor: e.target.value })}
+                      />
+                      <button type="button" className="inspector-clear" title="Reset to branch color" onClick={() => applyStyle({ edgeColor: undefined })}>
+                        <span className="material-symbols-rounded">restart_alt</span>
+                      </button>
+                    </div>
+                  </div>
+                </details>
+
+                {/* Structure */}
+                <details className="inspector-section" open>
+                  <summary>Structure</summary>
+                  <div className="inspector-section__body">
+                    <div className="inspector-row">
+                      <label className="inspector-label">Layout</label>
+                      <div className="layout-mode-btns">
+                        {(
+                          [
+                            { value: "", icon: "remove", title: "Inherit" },
+                            { value: "balanced", icon: "hub", title: "Balanced" },
+                            { value: "right", icon: "east", title: "Right" },
+                            { value: "left", icon: "west", title: "Left" },
+                            { value: "down", icon: "south", title: "Down" },
+                            { value: "up", icon: "north", title: "Up" },
+                            { value: "right-aligned", icon: "subdirectory_arrow_right", title: "Tree Right" },
+                            { value: "left-aligned", icon: "subdirectory_arrow_left", title: "Tree Left" },
+                            { value: "down-aligned", icon: "account_tree", title: "Tree Down" },
+                            { value: "up-aligned", icon: "device_hub", title: "Tree Up" },
+                          ] as const
+                        ).map(({ value, icon, title }) => (
+                          <button
+                            key={value}
+                            type="button"
+                            title={title}
+                            className={`layout-mode-btn${commonLayout === value ? " layout-mode-btn--active" : ""}`}
+                            onClick={() => applyStyle({ nodeLayout: (value as LayoutMode) || undefined })}
+                          >
+                            <span className="material-symbols-rounded">{icon}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </details>
               </div>
             );
-          })() : editor.selectedNode ? (
-            <div className="inspector-node">
-              <InspectorTitle
-                key={editor.selectedNode.id}
-                nodeId={editor.selectedNode.id}
-                title={editor.selectedNode.title}
-                onCommit={editor.renameNode}
-              />
-
-              <div className="inspector-row">
-                <label className="inspector-label">Radius</label>
-                <div className="layout-mode-btns">
-                  {(
-                    [
-                      { value: 0, icon: "crop_square", title: "Sharp" },
-                      { value: 8, icon: "rounded_corner", title: "Rounded" },
-                      { value: 999, icon: "circle", title: "Pill" },
-                    ] as const
-                  ).map(({ value, icon, title }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      title={title}
-                      className={`layout-mode-btn${(editor.selectedNode?.borderRadius ?? 8) === value ? " layout-mode-btn--active" : ""}`}
-                      onClick={() =>
-                        editor.selectedNode &&
-                        editor.updateNodeStyle(editor.selectedNode.id, {
-                          borderRadius: value === 8 ? undefined : value,
-                        })
-                      }
-                    >
-                      <span className="material-symbols-rounded">{icon}</span>
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="number"
-                  min={0}
-                  max={999}
-                  value={editor.selectedNode.borderRadius ?? 8}
-                  style={{ width: 52 }}
-                  onChange={(e) =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, {
-                      borderRadius: Number(e.target.value) === 8 ? undefined : Number(e.target.value),
-                    })
-                  }
-                />
-              </div>
-
-              <div className="inspector-row">
-                <label className="inspector-label">Fill</label>
-                <button
-                  type="button"
-                  className={`inspector-preset-btn${editor.selectedNode.bgColor === "transparent" ? " inspector-preset-btn--active" : ""}`}
-                  title="No fill (transparent)"
-                  onClick={() =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { bgColor: "transparent" })
-                  }
-                >
-                  <span className="material-symbols-rounded">block</span>
-                </button>
-                <input
-                  type="color"
-                  value={editor.selectedNode.bgColor && editor.selectedNode.bgColor !== "transparent" ? editor.selectedNode.bgColor : "#ffffff"}
-                  onChange={(e) =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { bgColor: e.target.value })
-                  }
-                />
-                <button
-                  type="button"
-                  className="inspector-clear"
-                  title="Reset to theme default"
-                  onClick={() =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { bgColor: undefined })
-                  }
-                >
-                  <span className="material-symbols-rounded">restart_alt</span>
-                </button>
-              </div>
-
-              <div className="inspector-row">
-                <label className="inspector-label">Border</label>
-                <button
-                  type="button"
-                  className={`inspector-preset-btn${(editor.selectedNode.borderWidth ?? 1) === 0 ? " inspector-preset-btn--active" : ""}`}
-                  title="No border"
-                  onClick={() =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { borderWidth: 0, borderColor: undefined })
-                  }
-                >
-                  <span className="material-symbols-rounded">block</span>
-                </button>
-                <input
-                  type="number"
-                  min={0}
-                  max={16}
-                  value={editor.selectedNode.borderWidth ?? 1}
-                  style={{ width: 52 }}
-                  onChange={(e) =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { borderWidth: Number(e.target.value) })
-                  }
-                />
-                <input
-                  type="color"
-                  value={editor.selectedNode.borderColor || "#6b7280"}
-                  onChange={(e) =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { borderColor: e.target.value })
-                  }
-                />
-                <button
-                  type="button"
-                  className="inspector-clear"
-                  title="Reset to default"
-                  onClick={() =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { borderWidth: undefined, borderColor: undefined })
-                  }
-                >
-                  <span className="material-symbols-rounded">restart_alt</span>
-                </button>
-              </div>
-
-              <div className="inspector-row">
-                <label className="inspector-label">Text</label>
-                <input
-                  type="color"
-                  value={editor.selectedNode.textColor || "#111827"}
-                  onChange={(e) =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { textColor: e.target.value })
-                  }
-                />
-                <button
-                  type="button"
-                  className="inspector-clear"
-                  title="Reset to default"
-                  onClick={() =>
-                    editor.selectedNode &&
-                    editor.updateNodeStyle(editor.selectedNode.id, { textColor: undefined })
-                  }
-                >
-                  <span className="material-symbols-rounded">restart_alt</span>
-                </button>
-              </div>
-
-              <div className="inspector-row">
-                <label className="inspector-label">Layout</label>
-                <div className="layout-mode-btns">
-                  {(
-                    [
-                      { value: "", icon: "remove", title: "Inherit" },
-                      { value: "balanced", icon: "hub", title: "Balanced" },
-                      { value: "right", icon: "east", title: "Right" },
-                      { value: "left", icon: "west", title: "Left" },
-                      { value: "down", icon: "south", title: "Down" },
-                      { value: "up", icon: "north", title: "Up" },
-                    ] as const
-                  ).map(({ value, icon, title }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      title={title}
-                      className={`layout-mode-btn${(editor.selectedNode?.nodeLayout || "") === value ? " layout-mode-btn--active" : ""}`}
-                      onClick={() =>
-                        editor.selectedNode &&
-                        editor.updateNodeStyle(editor.selectedNode.id, {
-                          nodeLayout: (value as LayoutMode) || undefined,
-                        })
-                      }
-                    >
-                      <span className="material-symbols-rounded">{icon}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
+          })() : (
             <div className="inspector-empty">Select a node to inspect</div>
           )}
         </aside>

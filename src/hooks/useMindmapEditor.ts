@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { LayoutMode, MindmapDocument, MindmapNode, MindmapSnapshot } from "../domain/mindmap";
+import type { EdgeEnd, EdgeStyle, LayoutMode, MindmapDocument, MindmapNode, MindmapSnapshot } from "../domain/mindmap";
 import { createEmptyMindmap, getDescendantIds } from "../domain/mindmap";
 
 type EditorState = {
@@ -219,6 +219,10 @@ export const useMindmapEditor = () => {
     borderColor?: string | undefined;
     textColor?: string | undefined;
     nodeLayout?: LayoutMode | undefined;
+    edgeStyle?: EdgeStyle | undefined;
+    edgeEnd?: EdgeEnd | undefined;
+    edgeWidth?: number | undefined;
+    edgeColor?: string | undefined;
   };
 
   const updateNodeStyle = (nodeId: string, style: NodeStyleProps) => {

@@ -1,6 +1,6 @@
 import { appConfig } from "../../config/env";
 import type { MindmapDocument, MindmapEdge, MindmapNode, MindmapSnapshot } from "../../domain/mindmap";
-import { createEmptyMindmap, isLayoutMode } from "../../domain/mindmap";
+import { createEmptyMindmap, isEdgeEnd, isEdgeStyle, isLayoutMode } from "../../domain/mindmap";
 import type {
   CreateGraphSheetInput,
   CreateGraphSpreadsheetInput,
@@ -19,7 +19,7 @@ const STORE_FOLDER_NAME = "react-mind";
 const STORE_FOLDER_FLAG_KEY = "reactMindStoreFolder";
 const STORE_FOLDER_FLAG_VALUE = "true";
 const ROW_HEADERS = ["kind", "id", "title", "parentId", "order", "fromNodeId", "toNodeId", "x", "y", "borderRadius",
-  "bgColor", "borderWidth", "borderColor", "textColor", "nodeLayout"];
+  "bgColor", "borderWidth", "borderColor", "textColor", "nodeLayout", "edgeStyle", "edgeEnd", "edgeWidth", "edgeColor"];
 
 type GraphRowKind = "node" | "edge";
 
@@ -230,6 +230,10 @@ const parseNodes = (rows: string[][]): MindmapNode[] => {
       borderColor: row[12] || undefined,
       textColor: row[13] || undefined,
       nodeLayout: isLayoutMode(row[14]) ? row[14] : undefined,
+      edgeStyle: isEdgeStyle(row[15]) ? row[15] : undefined,
+      edgeEnd: isEdgeEnd(row[16]) ? row[16] : undefined,
+      edgeWidth: row[17] ? Number(row[17]) : undefined,
+      edgeColor: row[18] || undefined,
     }));
 };
 
@@ -279,6 +283,10 @@ const buildGraphRows = (document: MindmapDocument): string[][] => {
     node.borderColor ?? "",
     node.textColor ?? "",
     node.nodeLayout ?? "",
+    node.edgeStyle ?? "",
+    node.edgeEnd ?? "",
+    node.edgeWidth != null ? String(node.edgeWidth) : "",
+    node.edgeColor ?? "",
   ]);
 
   const edgeRows = document.edges.map((edge) => [
@@ -289,6 +297,10 @@ const buildGraphRows = (document: MindmapDocument): string[][] => {
     "",
     edge.fromNodeId,
     edge.toNodeId,
+    "",
+    "",
+    "",
+    "",
     "",
     "",
     "",
@@ -410,7 +422,7 @@ const initializeGraphSheet = async (spreadsheetId: string, sheetTitle: string): 
   const title = toSheetTitle(sheetTitle);
   const document = createEmptyMindmap(spreadsheetId, title);
   const nowIso = new Date().toISOString();
-  await sheetsFetch<{ clearedRanges?: string[] }>(spreadsheetId, `/values/${encodeURIComponent(title)}!A:O:clear`, {
+  await sheetsFetch<{ clearedRanges?: string[] }>(spreadsheetId, `/values/${encodeURIComponent(title)}!A:S:clear`, {
     method: "POST",
     body: JSON.stringify({}),
   });
@@ -421,7 +433,7 @@ const initializeGraphSheet = async (spreadsheetId: string, sheetTitle: string): 
       valueInputOption: "RAW",
       data: [
         {
-          range: `${title}!A1:O`,
+          range: `${title}!A1:S`,
           majorDimension: "ROWS",
           values: buildGraphRows(document),
         },
@@ -588,7 +600,7 @@ export const googleSheetsService: GoogleSheetsService = {
     assertSheetsConfig();
 
     const title = toSheetTitle(sheetTitle);
-    const encodedRange = encodeURIComponent(`${title}!A1:O`);
+    const encodedRange = encodeURIComponent(`${title}!A1:S`);
     const result = await sheetsFetch<{ values?: string[][] }>(spreadsheetId, `/values/${encodedRange}`);
 
     const metaMap = await readMetaMap(spreadsheetId);
@@ -650,7 +662,7 @@ export const googleSheetsService: GoogleSheetsService = {
         valueInputOption: "RAW",
         data: [
           {
-            range: `${title}!A1:O`,
+            range: `${title}!A1:S`,
             majorDimension: "ROWS",
             values: rows,
           },
@@ -676,7 +688,7 @@ export const googleSheetsService: GoogleSheetsService = {
 
     await sheetsFetch<{ clearedRanges?: string[] }>(
       spreadsheetId,
-      `/values/${encodeURIComponent(`${title}!A${clearStartRow}:O${clearEndRow}`)}:clear`,
+      `/values/${encodeURIComponent(`${title}!A${clearStartRow}:S${clearEndRow}`)}:clear`,
       {
         method: "POST",
         body: JSON.stringify({}),
