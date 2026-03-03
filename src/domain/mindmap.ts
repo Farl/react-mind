@@ -40,6 +40,22 @@ export type MindmapDocument = {
   updatedAtIso: string;
 };
 
+/** Collect a node and all its descendants (BFS). */
+export const getDescendantIds = (nodes: MindmapNode[], rootId: string): Set<string> => {
+  const descendants = new Set<string>([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    nodes.forEach((n) => {
+      if (n.parentId && descendants.has(n.parentId) && !descendants.has(n.id)) {
+        descendants.add(n.id);
+        changed = true;
+      }
+    });
+  }
+  return descendants;
+};
+
 export const createEmptyMindmap = (id: string, title: string): MindmapDocument => ({
   id,
   title,

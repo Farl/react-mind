@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { LayoutMode, MindmapNode } from "../domain/mindmap";
+import { getDescendantIds } from "../domain/mindmap";
 
 type PositionedNode = {
   node: MindmapNode;
@@ -13,11 +14,13 @@ type PositionedNode = {
 
 type MindmapCanvasProps = {
   nodes: MindmapNode[];
-  selectedNodeId: string | null;
+  selectedNodeIds: string[];
   collapsedNodeIds: string[];
   editable: boolean;
   layoutMode: LayoutMode;
-  onSelectNode: (nodeId: string) => void;
+  onSelectNode: (nodeId: string | null) => void;
+  onToggleNodeSelection: (nodeId: string) => void;
+  onSelectNodes: (nodeIds: string[]) => void;
   onRenameNode: (nodeId: string, title: string) => void;
   onToggleCollapse: (nodeId: string) => void;
   onMoveNode: (nodeId: string, nextParentId: string, nextIndex: number) => void;
@@ -333,6 +336,34 @@ const buildBranchColorMap = (nodes: MindmapNode[]): Map<string, number> => {
   return map;
 };
 
+const buildEdgePath = (
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  direction: PositionedNode["direction"],
+): string => {
+  if (direction === "down") {
+    const dy = Math.abs(y2 - y1);
+    const cp = Math.max(20, dy * 0.4);
+    return `M ${x1} ${y1} C ${x1} ${y1 + cp}, ${x2} ${y2 - cp}, ${x2} ${y2}`;
+  }
+  if (direction === "up") {
+    const dy = Math.abs(y2 - y1);
+    const cp = Math.max(20, dy * 0.4);
+    return `M ${x1} ${y1} C ${x1} ${y1 - cp}, ${x2} ${y2 + cp}, ${x2} ${y2}`;
+  }
+  if (direction === "left") {
+    const dx = Math.abs(x2 - x1);
+    const cp = Math.max(20, dx * 0.4);
+    return `M ${x1} ${y1} C ${x1 - cp} ${y1}, ${x2 + cp} ${y2}, ${x2} ${y2}`;
+  }
+  // right
+  const dx = Math.abs(x2 - x1);
+  const cp = Math.max(20, dx * 0.4);
+  return `M ${x1} ${y1} C ${x1 + cp} ${y1}, ${x2 - cp} ${y2}, ${x2} ${y2}`;
+};
+
 const clampScale = (nextScale: number): number => Math.max(MIN_SCALE, Math.min(MAX_SCALE, nextScale));
 
 const getSiblingDropIndex = (siblings: PositionedNode[], pointerY: number): number => {
@@ -372,17 +403,20 @@ const getHiddenByCollapse = (nodes: MindmapNode[], collapsedNodeIds: Set<string>
 
 export function MindmapCanvas({
   nodes,
-  selectedNodeId,
+  selectedNodeIds,
   collapsedNodeIds,
   editable,
   layoutMode,
   onSelectNode,
+  onToggleNodeSelection,
+  onSelectNodes,
   onRenameNode,
   onToggleCollapse,
   onMoveNode,
   onMoveRootNode,
   onAddRootNode,
 }: MindmapCanvasProps) {
+  const selectedSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   const collapsedSet = useMemo(() => new Set(collapsedNodeIds), [collapsedNodeIds]);
   const hiddenSet = useMemo(() => getHiddenByCollapse(nodes, collapsedSet), [nodes, collapsedSet]);
   const visibleNodes = useMemo(() => nodes.filter((node) => !hiddenSet.has(node.id)), [nodes, hiddenSet]);
@@ -397,12 +431,25 @@ export function MindmapCanvas({
   const [editingTitle, setEditingTitle] = useState<string>("");
   const [rootDragging, setRootDragging] = useState<RootDraggingState | null>(null);
   const [rootDragOffset, setRootDragOffset] = useState<{ x: number; y: number } | null>(null);
+  const [reparentTarget, setReparentTarget] = useState<{
+    targetNodeId: string;
+    pointerLayoutX: number;
+    pointerLayoutY: number;
+  } | null>(null);
+  const [marquee, setMarquee] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+  } | null>(null);
 
   const scaleRef = useRef(1);
   const panRef = useRef({ x: 48, y: 48 });
   const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
   const offsetRef = useRef({ x: CANVAS_PAD, y: CANVAS_PAD });
   const rootDraggingRef = useRef(false);
+  const panMovedRef = useRef(false);
+  const dragDescendantsRef = useRef<Set<string> | null>(null);
 
   const nodesForLayout = useMemo(() => {
     if (rootDragging && rootDragOffset) {
@@ -436,6 +483,11 @@ export function MindmapCanvas({
 
   // Update offsetRef synchronously during render for use in event handlers
   offsetRef.current = { x: offsetX, y: offsetY };
+
+  const parentIdSet = useMemo(
+    () => new Set(nodes.filter((n) => n.parentId !== null).map((n) => n.parentId!)),
+    [nodes],
+  );
 
   const positionedByParent = useMemo(() => {
     const map = new Map<string | null, PositionedNode[]>();
@@ -550,8 +602,14 @@ export function MindmapCanvas({
     }
 
     viewport.addEventListener("wheel", handleViewportWheel, { passive: false });
+
+    // Prevent touchmove default to stop page scroll/bounce on mobile
+    const preventTouch = (e: TouchEvent) => { e.preventDefault(); };
+    viewport.addEventListener("touchmove", preventTouch, { passive: false });
+
     return () => {
       viewport.removeEventListener("wheel", handleViewportWheel);
+      viewport.removeEventListener("touchmove", preventTouch);
     };
   }, [editable]);
 
@@ -570,8 +628,18 @@ export function MindmapCanvas({
     }
 
     viewportRef.current.setPointerCapture(event.pointerId);
+
+    if (event.shiftKey) {
+      const rect = viewportRef.current.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      setMarquee({ startX: x, startY: y, currentX: x, currentY: y });
+      return;
+    }
+
     setIsPanning(true);
     lastPointerRef.current = { x: event.clientX, y: event.clientY };
+    panMovedRef.current = false;
   };
 
   const handleViewportDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -628,6 +696,18 @@ export function MindmapCanvas({
       return;
     }
 
+    if (marquee) {
+      const rect = viewportRef.current?.getBoundingClientRect();
+      if (rect) {
+        setMarquee({
+          ...marquee,
+          currentX: event.clientX - rect.left,
+          currentY: event.clientY - rect.top,
+        });
+      }
+      return;
+    }
+
     if (!isPanning || !lastPointerRef.current) {
       return;
     }
@@ -643,6 +723,7 @@ export function MindmapCanvas({
     panRef.current = nextPan;
     setPan(nextPan);
     lastPointerRef.current = { x: event.clientX, y: event.clientY };
+    panMovedRef.current = true;
   };
 
   const handleViewportPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -654,12 +735,47 @@ export function MindmapCanvas({
       viewportRef.current.releasePointerCapture(event.pointerId);
     }
 
+    if (marquee) {
+      const s = scaleRef.current;
+      const p = panRef.current;
+      const off = offsetRef.current;
+
+      const toLayoutX = (vx: number) => (vx - p.x) / s - off.x;
+      const toLayoutY = (vy: number) => (vy - p.y) / s - off.y;
+
+      const lx1 = toLayoutX(Math.min(marquee.startX, marquee.currentX));
+      const ly1 = toLayoutY(Math.min(marquee.startY, marquee.currentY));
+      const lx2 = toLayoutX(Math.max(marquee.startX, marquee.currentX));
+      const ly2 = toLayoutY(Math.max(marquee.startY, marquee.currentY));
+
+      const selected = positioned.filter((pos) => {
+        return pos.x < lx2 && pos.x + pos.width > lx1 && pos.y < ly2 && pos.y + pos.height > ly1;
+      });
+
+      if (selected.length > 0) {
+        onSelectNodes(selected.map((p) => p.node.id));
+      } else {
+        onSelectNode(null);
+      }
+      setMarquee(null);
+      return;
+    }
+
+    if (!panMovedRef.current && isPanning) {
+      onSelectNode(null);
+    }
+
     setIsPanning(false);
     lastPointerRef.current = null;
   };
 
   const handleNodePointerDown = (event: ReactPointerEvent<HTMLButtonElement>, item: PositionedNode) => {
     if (!editable) {
+      return;
+    }
+
+    if (event.shiftKey) {
+      onToggleNodeSelection(item.node.id);
       return;
     }
 
@@ -680,6 +796,7 @@ export function MindmapCanvas({
     }
 
     event.currentTarget.setPointerCapture(event.pointerId);
+    dragDescendantsRef.current = getDescendantIds(nodes, item.node.id);
     setDragging({
       nodeId: item.node.id,
       parentId: item.node.parentId,
@@ -704,17 +821,43 @@ export function MindmapCanvas({
       return;
     }
 
-    const svgPointY = (event.clientY - panRef.current.y) / scaleRef.current - offsetRef.current.y;
-    const siblings = (positionedByParent.get(dragging.parentId) || []).filter(
-      (item) => item.node.id !== dragging.nodeId,
-    );
-    const nextDropIndex = getSiblingDropIndex(siblings, svgPointY);
+    const pointerLayoutX = (event.clientX - panRef.current.x) / scaleRef.current - offsetRef.current.x;
+    const pointerLayoutY = (event.clientY - panRef.current.y) / scaleRef.current - offsetRef.current.y;
+
+    // Hit-test for reparent: is pointer over another node?
+    const draggedDescendants = dragDescendantsRef.current ?? new Set<string>([dragging.nodeId]);
+    let foundTarget: string | null = null;
+
+    for (const pos of positioned) {
+      if (pos.node.id === dragging.nodeId) continue;
+      if (draggedDescendants.has(pos.node.id)) continue;
+      if (
+        pointerLayoutX >= pos.x &&
+        pointerLayoutX <= pos.x + pos.width &&
+        pointerLayoutY >= pos.y &&
+        pointerLayoutY <= pos.y + pos.height
+      ) {
+        foundTarget = pos.node.id;
+        break;
+      }
+    }
+
+    if (foundTarget && foundTarget !== dragging.parentId) {
+      setReparentTarget({ targetNodeId: foundTarget, pointerLayoutX, pointerLayoutY });
+      setDropIndex(null);
+    } else {
+      setReparentTarget(null);
+      const siblings = (positionedByParent.get(dragging.parentId) || []).filter(
+        (item) => item.node.id !== dragging.nodeId,
+      );
+      const nextDropIndex = getSiblingDropIndex(siblings, pointerLayoutY);
+      setDropIndex(nextDropIndex);
+    }
 
     setDragging({
       ...dragging,
-      currentY: svgPointY,
+      currentY: pointerLayoutY,
     });
-    setDropIndex(nextDropIndex);
   };
 
   const handleNodePointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -742,6 +885,16 @@ export function MindmapCanvas({
       return;
     }
 
+    if (reparentTarget) {
+      const targetChildren = nodes.filter((n) => n.parentId === reparentTarget.targetNodeId);
+      onMoveNode(dragging.nodeId, reparentTarget.targetNodeId, targetChildren.length);
+      setDragging(null);
+      setDropIndex(null);
+      setReparentTarget(null);
+      dragDescendantsRef.current = null;
+      return;
+    }
+
     const siblings = positionedByParent.get(dragging.parentId) || [];
     const currentIndex = siblings.findIndex((item) => item.node.id === dragging.nodeId);
     const nextIndex = dropIndex ?? currentIndex;
@@ -752,6 +905,8 @@ export function MindmapCanvas({
 
     setDragging(null);
     setDropIndex(null);
+    setReparentTarget(null);
+    dragDescendantsRef.current = null;
   };
 
   const dropGuide = (() => {
@@ -849,34 +1004,29 @@ export function MindmapCanvas({
                 const branchIdx = branchColorMap.get(item.node.id);
                 const branchClass = branchIdx !== undefined ? ` mindmap-branch--${branchIdx}` : "";
 
-                let d: string;
+                let x1: number, y1: number, x2: number, y2: number;
                 if (item.direction === "down") {
-                  const x1 = parent.x + parent.width / 2 + offsetX;
-                  const y1 = parent.y + parent.height + offsetY;
-                  const x2 = item.x + item.width / 2 + offsetX;
-                  const y2 = item.y + offsetY;
-                  const cy = (y1 + y2) / 2;
-                  d = `M ${x1} ${y1} C ${x1} ${cy}, ${x2} ${cy}, ${x2} ${y2}`;
+                  x1 = parent.x + parent.width / 2 + offsetX;
+                  y1 = parent.y + parent.height + offsetY;
+                  x2 = item.x + item.width / 2 + offsetX;
+                  y2 = item.y + offsetY;
                 } else if (item.direction === "up") {
-                  const x1 = parent.x + parent.width / 2 + offsetX;
-                  const y1 = parent.y + offsetY;
-                  const x2 = item.x + item.width / 2 + offsetX;
-                  const y2 = item.y + item.height + offsetY;
-                  const cy = (y1 + y2) / 2;
-                  d = `M ${x1} ${y1} C ${x1} ${cy}, ${x2} ${cy}, ${x2} ${y2}`;
+                  x1 = parent.x + parent.width / 2 + offsetX;
+                  y1 = parent.y + offsetY;
+                  x2 = item.x + item.width / 2 + offsetX;
+                  y2 = item.y + item.height + offsetY;
                 } else if (item.direction === "left") {
-                  const x1 = parent.x + offsetX;
-                  const y1 = parent.y + parent.height / 2 + offsetY;
-                  const x2 = item.x + item.width + offsetX;
-                  const y2 = item.y + item.height / 2 + offsetY;
-                  d = `M ${x1} ${y1} C ${x1 - 50} ${y1}, ${x2 + 50} ${y2}, ${x2} ${y2}`;
+                  x1 = parent.x + offsetX;
+                  y1 = parent.y + parent.height / 2 + offsetY;
+                  x2 = item.x + item.width + offsetX;
+                  y2 = item.y + item.height / 2 + offsetY;
                 } else {
-                  const x1 = parent.x + parent.width + offsetX;
-                  const y1 = parent.y + parent.height / 2 + offsetY;
-                  const x2 = item.x + offsetX;
-                  const y2 = item.y + item.height / 2 + offsetY;
-                  d = `M ${x1} ${y1} C ${x1 + 50} ${y1}, ${x2 - 50} ${y2}, ${x2} ${y2}`;
+                  x1 = parent.x + parent.width + offsetX;
+                  y1 = parent.y + parent.height / 2 + offsetY;
+                  x2 = item.x + offsetX;
+                  y2 = item.y + item.height / 2 + offsetY;
                 }
+                const d = buildEdgePath(x1, y1, x2, y2, item.direction);
 
                 return (
                   <path key={`edge-${item.node.id}`} className={`mindmap-edge${branchClass}`} d={d} />
@@ -892,22 +1042,61 @@ export function MindmapCanvas({
                   y2={dropGuide.y + offsetY}
                 />
               ) : null}
+
+              {reparentTarget && dragging ? (() => {
+                const target = byId.get(reparentTarget.targetNodeId);
+                if (!target) return null;
+
+                let tx: number, ty: number;
+                if (reparentTarget.pointerLayoutX > target.x + target.width) {
+                  tx = target.x + target.width + offsetX;
+                  ty = target.y + target.height / 2 + offsetY;
+                } else if (reparentTarget.pointerLayoutX < target.x) {
+                  tx = target.x + offsetX;
+                  ty = target.y + target.height / 2 + offsetY;
+                } else if (reparentTarget.pointerLayoutY > target.y + target.height) {
+                  tx = target.x + target.width / 2 + offsetX;
+                  ty = target.y + target.height + offsetY;
+                } else {
+                  tx = target.x + target.width / 2 + offsetX;
+                  ty = target.y + offsetY;
+                }
+
+                const px = reparentTarget.pointerLayoutX + offsetX;
+                const py = reparentTarget.pointerLayoutY + offsetY;
+                const previewD = buildEdgePath(tx, ty, px, py, "right");
+
+                return (
+                  <>
+                    <rect
+                      x={target.x + offsetX - 3}
+                      y={target.y + offsetY - 3}
+                      width={target.width + 6}
+                      height={target.height + 6}
+                      rx={10}
+                      className="mindmap-reparent-highlight"
+                    />
+                    <path className="mindmap-reparent-preview" d={previewD} />
+                  </>
+                );
+              })() : null}
             </svg>
 
             <div className="mindmap-nodes" style={{ width, height }}>
               {positioned.map((item) => {
-                const hasChildren = nodes.some((node) => node.parentId === item.node.id);
+                const hasChildren = parentIdSet.has(item.node.id);
                 const isCollapsed = collapsedSet.has(item.node.id);
                 const isRoot = item.direction === "root";
                 const branchIdx = branchColorMap.get(item.node.id);
                 const branchClass = branchIdx !== undefined ? ` mindmap-branch--${branchIdx}` : "";
-                const selectedClass = item.node.id === selectedNodeId ? " map-node--selected" : "";
+                const selectedClass = selectedSet.has(item.node.id) ? " map-node--selected" : "";
                 const rootClass = isRoot ? " map-node--root" : "";
+                const reparentClass = reparentTarget?.targetNodeId === item.node.id ? " map-node--reparent-target" : "";
                 return (
                   <button
                     key={item.node.id}
                     type="button"
-                    className={`map-node${rootClass}${selectedClass}${branchClass}`}
+                    className={`map-node${rootClass}${selectedClass}${branchClass}${reparentClass}`}
                     style={{
                       left: item.x + offsetX,
                       top: item.y + offsetY,
@@ -985,6 +1174,19 @@ export function MindmapCanvas({
             </div>
           </div>
         </div>
+        {marquee ? (
+          <div
+            className="mindmap-marquee"
+            style={{
+              position: "absolute",
+              left: Math.min(marquee.startX, marquee.currentX),
+              top: Math.min(marquee.startY, marquee.currentY),
+              width: Math.abs(marquee.currentX - marquee.startX),
+              height: Math.abs(marquee.currentY - marquee.startY),
+              pointerEvents: "none",
+            }}
+          />
+        ) : null}
       </div>
     </div>
   );

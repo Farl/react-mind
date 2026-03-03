@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import type { LayoutMode, MindmapDocument, MindmapNode, MindmapSnapshot } from "../domain/mindmap";
-import { createEmptyMindmap } from "../domain/mindmap";
+import { createEmptyMindmap, getDescendantIds } from "../domain/mindmap";
 
 type EditorState = {
   document: MindmapDocument;
-  selectedNodeId: string | null;
+  selectedNodeIds: string[];
   collapsedNodeIds: string[];
   history: MindmapSnapshot[];
   historyIndex: number;
@@ -27,23 +27,6 @@ const withUpdatedTimestamp = (document: MindmapDocument): MindmapDocument => ({
   ...document,
   updatedAtIso: new Date().toISOString(),
 });
-
-const getDescendantIds = (nodes: MindmapNode[], rootId: string): Set<string> => {
-  const descendants = new Set<string>([rootId]);
-  let hasNewItem = true;
-
-  while (hasNewItem) {
-    hasNewItem = false;
-    nodes.forEach((node) => {
-      if (node.parentId && descendants.has(node.parentId) && !descendants.has(node.id)) {
-        descendants.add(node.id);
-        hasNewItem = true;
-      }
-    });
-  }
-
-  return descendants;
-};
 
 const sortSiblingNodes = (nodes: MindmapNode[]): MindmapNode[] =>
   [...nodes].sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));
@@ -95,7 +78,7 @@ export const useMindmapEditor = () => {
     const firstSnapshot = createSnapshot(initialDocument, "manual");
     return {
       document: initialDocument,
-      selectedNodeId: initialDocument.nodes[0]?.id ?? null,
+      selectedNodeIds: initialDocument.nodes[0] ? [initialDocument.nodes[0].id] : [],
       collapsedNodeIds: [],
       history: [firstSnapshot],
       historyIndex: 0,
@@ -115,7 +98,26 @@ export const useMindmapEditor = () => {
   const selectNode = (nodeId: string | null) => {
     setState((current) => ({
       ...current,
-      selectedNodeId: nodeId,
+      selectedNodeIds: nodeId ? [nodeId] : [],
+    }));
+  };
+
+  const toggleNodeSelection = (nodeId: string) => {
+    setState((current) => {
+      const idx = current.selectedNodeIds.indexOf(nodeId);
+      if (idx >= 0) {
+        const next = [...current.selectedNodeIds];
+        next.splice(idx, 1);
+        return { ...current, selectedNodeIds: next };
+      }
+      return { ...current, selectedNodeIds: [...current.selectedNodeIds, nodeId] };
+    });
+  };
+
+  const selectNodes = (nodeIds: string[]) => {
+    setState((current) => ({
+      ...current,
+      selectedNodeIds: nodeIds,
     }));
   };
 
@@ -145,7 +147,7 @@ export const useMindmapEditor = () => {
         ...current,
         ...historyState,
         document: nextDocument,
-        selectedNodeId: newNode.id,
+        selectedNodeIds: [newNode.id],
         collapsedNodeIds: current.collapsedNodeIds.filter((id) => id !== parentId),
       };
     });
@@ -177,7 +179,7 @@ export const useMindmapEditor = () => {
         ...current,
         ...historyState,
         document: nextDocument,
-        selectedNodeId: newNode.id,
+        selectedNodeIds: [newNode.id],
       };
     });
   };
@@ -205,7 +207,7 @@ export const useMindmapEditor = () => {
         ...current,
         ...historyState,
         document: nextDocument,
-        selectedNodeId: newNode.id,
+        selectedNodeIds: [newNode.id],
       };
     });
   };
@@ -222,6 +224,16 @@ export const useMindmapEditor = () => {
   const updateNodeStyle = (nodeId: string, style: NodeStyleProps) => {
     setState((current) => {
       const nextNodes = current.document.nodes.map((n) => (n.id === nodeId ? { ...n, ...style } : n));
+      const nextDocument = withUpdatedTimestamp({ ...current.document, nodes: nextNodes });
+      const historyState = pushHistory(current, nextDocument);
+      return { ...current, ...historyState, document: nextDocument };
+    });
+  };
+
+  const updateMultipleNodeStyles = (nodeIds: string[], style: NodeStyleProps) => {
+    setState((current) => {
+      const idSet = new Set(nodeIds);
+      const nextNodes = current.document.nodes.map((n) => (idSet.has(n.id) ? { ...n, ...style } : n));
       const nextDocument = withUpdatedTimestamp({ ...current.document, nodes: nextNodes });
       const historyState = pushHistory(current, nextDocument);
       return { ...current, ...historyState, document: nextDocument };
@@ -354,7 +366,7 @@ export const useMindmapEditor = () => {
         ...current,
         ...historyState,
         document: nextDocument,
-        selectedNodeId: nodeId,
+        selectedNodeIds: [nodeId],
       };
     });
   };
@@ -367,19 +379,7 @@ export const useMindmapEditor = () => {
         return current;
       }
 
-      const descendants = new Set<string>([nodeId]);
-      let hasNewItem = true;
-
-      while (hasNewItem) {
-        hasNewItem = false;
-        current.document.nodes.forEach((node) => {
-          if (node.parentId && descendants.has(node.parentId) && !descendants.has(node.id)) {
-            descendants.add(node.id);
-            hasNewItem = true;
-          }
-        });
-      }
-
+      const descendants = getDescendantIds(current.document.nodes, nodeId);
       const nextNodes = current.document.nodes.filter((node) => !descendants.has(node.id));
       const nextDocument = withUpdatedTimestamp({
         ...current.document,
@@ -389,14 +389,48 @@ export const useMindmapEditor = () => {
       const historyState = pushHistory(current, nextDocument);
 
       const remainingRoots = nextNodes.filter((n) => n.parentId === null);
-      const nextSelected = remainingRoots[0]?.id ?? nextNodes[0]?.id ?? null;
+      const nextSelected = remainingRoots[0]?.id ?? nextNodes[0]?.id;
 
       return {
         ...current,
         ...historyState,
         document: nextDocument,
-        selectedNodeId: nextSelected,
+        selectedNodeIds: nextSelected ? [nextSelected] : [],
         collapsedNodeIds: current.collapsedNodeIds.filter((id) => !descendants.has(id)),
+      };
+    });
+  };
+
+  const deleteMultipleNodes = (nodeIds: string[]) => {
+    setState((current) => {
+      const toDelete = new Set<string>();
+      for (const nodeId of nodeIds) {
+        const descendants = getDescendantIds(current.document.nodes, nodeId);
+        descendants.forEach((id) => toDelete.add(id));
+      }
+
+      const roots = current.document.nodes.filter((n) => n.parentId === null);
+      const remainingRoots = roots.filter((r) => !toDelete.has(r.id));
+      if (remainingRoots.length === 0 && roots[0]) {
+        toDelete.delete(roots[0].id);
+      }
+
+      const nextNodes = current.document.nodes.filter((n) => !toDelete.has(n.id));
+      const nextDocument = withUpdatedTimestamp({ ...current.document, nodes: nextNodes });
+      const historyState = pushHistory(current, nextDocument);
+
+      const nextSelected = current.selectedNodeIds.filter((id) => !toDelete.has(id));
+      if (nextSelected.length === 0) {
+        const fallback = nextNodes.filter((n) => n.parentId === null)[0]?.id ?? nextNodes[0]?.id;
+        if (fallback) nextSelected.push(fallback);
+      }
+
+      return {
+        ...current,
+        ...historyState,
+        document: nextDocument,
+        selectedNodeIds: nextSelected,
+        collapsedNodeIds: current.collapsedNodeIds.filter((id) => !toDelete.has(id)),
       };
     });
   };
@@ -424,74 +458,50 @@ export const useMindmapEditor = () => {
 
   const selectParentNode = () => {
     setState((current) => {
-      if (!current.selectedNodeId) {
-        return current;
-      }
+      const primaryId = current.selectedNodeIds[0];
+      if (!primaryId) return current;
 
-      const selected = current.document.nodes.find((node) => node.id === current.selectedNodeId);
-      if (!selected?.parentId) {
-        return current;
-      }
+      const selected = current.document.nodes.find((node) => node.id === primaryId);
+      if (!selected?.parentId) return current;
 
-      return {
-        ...current,
-        selectedNodeId: selected.parentId,
-      };
+      return { ...current, selectedNodeIds: [selected.parentId] };
     });
   };
 
   const selectFirstChildNode = () => {
     setState((current) => {
-      if (!current.selectedNodeId) {
-        return current;
-      }
+      const primaryId = current.selectedNodeIds[0];
+      if (!primaryId) return current;
 
-      const selected = current.document.nodes.find((node) => node.id === current.selectedNodeId);
-      if (!selected) {
-        return current;
-      }
+      const selected = current.document.nodes.find((node) => node.id === primaryId);
+      if (!selected) return current;
 
       const childrenMap = buildChildrenMap(current.document.nodes);
       const children = childrenMap.get(selected.id) || [];
-      if (children.length === 0) {
-        return current;
-      }
+      if (children.length === 0) return current;
 
-      return {
-        ...current,
-        selectedNodeId: children[0].id,
-      };
+      return { ...current, selectedNodeIds: [children[0].id] };
     });
   };
 
   const selectSiblingNode = (direction: -1 | 1) => {
     setState((current) => {
-      if (!current.selectedNodeId) {
-        return current;
-      }
+      const primaryId = current.selectedNodeIds[0];
+      if (!primaryId) return current;
 
-      const selected = current.document.nodes.find((node) => node.id === current.selectedNodeId);
-      if (!selected) {
-        return current;
-      }
+      const selected = current.document.nodes.find((node) => node.id === primaryId);
+      if (!selected) return current;
 
       const siblings = sortSiblingNodes(
         current.document.nodes.filter((node) => node.parentId === selected.parentId),
       );
       const index = siblings.findIndex((node) => node.id === selected.id);
-      if (index === -1) {
-        return current;
-      }
+      if (index === -1) return current;
 
       const nextIndex = index + direction;
-      if (nextIndex < 0 || nextIndex >= siblings.length) {
-        return current;
-      }
+      if (nextIndex < 0 || nextIndex >= siblings.length) return current;
 
-      return {
-        ...current,
-        selectedNodeId: siblings[nextIndex].id,
-      };
+      return { ...current, selectedNodeIds: [siblings[nextIndex].id] };
     });
   };
 
@@ -502,6 +512,7 @@ export const useMindmapEditor = () => {
       }
       const nextIndex = current.historyIndex - 1;
       const snapshot = current.history[nextIndex];
+      const nodeIdSet = new Set(snapshot.nodes.map((n) => n.id));
       return {
         ...current,
         historyIndex: nextIndex,
@@ -511,6 +522,7 @@ export const useMindmapEditor = () => {
           edges: [...snapshot.edges],
           updatedAtIso: snapshot.createdAtIso,
         },
+        selectedNodeIds: current.selectedNodeIds.filter((id) => nodeIdSet.has(id)),
         collapsedNodeIds: [],
       };
     });
@@ -523,6 +535,7 @@ export const useMindmapEditor = () => {
       }
       const nextIndex = current.historyIndex + 1;
       const snapshot = current.history[nextIndex];
+      const nodeIdSet = new Set(snapshot.nodes.map((n) => n.id));
       return {
         ...current,
         historyIndex: nextIndex,
@@ -532,6 +545,7 @@ export const useMindmapEditor = () => {
           edges: [...snapshot.edges],
           updatedAtIso: snapshot.createdAtIso,
         },
+        selectedNodeIds: current.selectedNodeIds.filter((id) => nodeIdSet.has(id)),
         collapsedNodeIds: [],
       };
     });
@@ -545,30 +559,42 @@ export const useMindmapEditor = () => {
         ...current,
         ...historyState,
         document: nextDocument,
-        selectedNodeId: nextDocument.nodes[0]?.id ?? null,
+        selectedNodeIds: nextDocument.nodes[0] ? [nextDocument.nodes[0].id] : [],
         collapsedNodeIds: [],
       };
     });
   };
 
-  const selectedNode = state.document.nodes.find((node) => node.id === state.selectedNodeId) ?? null;
+  const selectedNode = state.selectedNodeIds.length > 0
+    ? state.document.nodes.find((node) => node.id === state.selectedNodeIds[0]) ?? null
+    : null;
+  const selectedNodes = useMemo(() => {
+    const idSet = new Set(state.selectedNodeIds);
+    return state.document.nodes.filter((n) => idSet.has(n.id));
+  }, [state.document.nodes, state.selectedNodeIds]);
   const currentSnapshot = state.history[state.historyIndex] ?? null;
 
   return {
     document: state.document,
     selectedNode,
+    selectedNodes,
+    selectedNodeIds: state.selectedNodeIds,
     currentSnapshot,
     historyCount: state.history.length,
     historyIndex: state.historyIndex,
     collapsedNodeIds: state.collapsedNodeIds,
     selectNode,
+    toggleNodeSelection,
+    selectNodes,
     addChildNode,
     addSiblingNode,
     addRootNode,
     moveRootNode,
     updateNodeStyle,
+    updateMultipleNodeStyles,
     renameNode,
     deleteNode,
+    deleteMultipleNodes,
     toggleNodeCollapsed,
     selectParentNode,
     selectFirstChildNode,

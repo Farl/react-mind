@@ -99,6 +99,8 @@ export function EditorShell({ appName }: EditorShellProps) {
   const [selectedTheme, setSelectedTheme] = useState<string>(
     () => localStorage.getItem("reactMind.theme") || "classic",
   );
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const prevSelectedCountRef = useRef(0);
 
   const parseSpreadsheetId = (input: string): string => {
     const trimmed = input.trim();
@@ -136,6 +138,16 @@ export function EditorShell({ appName }: EditorShellProps) {
     document.body.dataset.theme = selectedTheme === "classic" ? "" : selectedTheme;
     localStorage.setItem("reactMind.theme", selectedTheme);
   }, [selectedTheme]);
+
+  // Auto-open inspector on mobile when selection goes from empty → non-empty
+  useEffect(() => {
+    const prev = prevSelectedCountRef.current;
+    const curr = editor.selectedNodeIds.length;
+    prevSelectedCountRef.current = curr;
+    if (prev === 0 && curr > 0) {
+      setInspectorOpen(true);
+    }
+  }, [editor.selectedNodeIds]);
 
   const dismissToast = useCallback((id: number) => {
     const timer = toastTimersRef.current.get(id);
@@ -547,6 +559,14 @@ export function EditorShell({ appName }: EditorShellProps) {
     });
   };
 
+  const handleDeleteSelected = () => {
+    if (editor.selectedNodeIds.length > 1) {
+      editor.deleteMultipleNodes(editor.selectedNodeIds);
+    } else if (editor.selectedNode) {
+      editor.deleteNode(editor.selectedNode.id);
+    }
+  };
+
   const handleReloadRemote = async () => {
     if (!selectedSpreadsheetId || !selectedSheetTitle) {
       return;
@@ -793,19 +813,19 @@ export function EditorShell({ appName }: EditorShellProps) {
         return;
       }
 
-      if (!canEditGraph || !editor.selectedNode) {
+      if (!canEditGraph || editor.selectedNodeIds.length === 0) {
         return;
       }
 
       if (event.key === "Tab") {
         event.preventDefault();
-        editor.addChildNode(editor.selectedNode.id);
+        if (editor.selectedNode) editor.addChildNode(editor.selectedNode.id);
         return;
       }
 
       if (event.key === "Enter") {
         event.preventDefault();
-        if (editor.selectedNode.parentId !== null) {
+        if (editor.selectedNode && editor.selectedNode.parentId !== null) {
           editor.addSiblingNode(editor.selectedNode.id);
         }
         return;
@@ -813,7 +833,7 @@ export function EditorShell({ appName }: EditorShellProps) {
 
       if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
-        editor.deleteNode(editor.selectedNode.id);
+        handleDeleteSelected();
         return;
       }
 
@@ -917,10 +937,10 @@ export function EditorShell({ appName }: EditorShellProps) {
                 <button
                   type="button"
                   onClick={() => {
-                    editor.selectedNode && editor.deleteNode(editor.selectedNode.id);
+                    handleDeleteSelected();
                     closeAllMenus();
                   }}
-                  disabled={!editor.selectedNode || isLastRoot}
+                  disabled={editor.selectedNodeIds.length === 0 || isLastRoot}
                 >
                   Delete
                 </button>
@@ -1012,17 +1032,27 @@ export function EditorShell({ appName }: EditorShellProps) {
               </div>
               <MindmapCanvas
                 nodes={editor.document.nodes}
-                selectedNodeId={editor.selectedNode?.id ?? null}
+                selectedNodeIds={editor.selectedNodeIds}
                 collapsedNodeIds={editor.collapsedNodeIds}
                 editable={canEditGraph}
                 layoutMode={layoutMode}
                 onSelectNode={editor.selectNode}
+                onToggleNodeSelection={editor.toggleNodeSelection}
+                onSelectNodes={editor.selectNodes}
                 onRenameNode={editor.renameNode}
                 onToggleCollapse={editor.toggleNodeCollapsed}
                 onMoveNode={editor.moveNode}
                 onMoveRootNode={editor.moveRootNode}
                 onAddRootNode={(x, y) => editor.addRootNode(x, y)}
               />
+              <button
+                type="button"
+                className="inspector-toggle"
+                aria-label="Open inspector"
+                onClick={() => setInspectorOpen(true)}
+              >
+                <span className="material-symbols-rounded">tune</span>
+              </button>
             </div>
 
             {connection.authState === "authorized" ? (
@@ -1095,10 +1125,156 @@ export function EditorShell({ appName }: EditorShellProps) {
           </div>
         </section>
 
-        <aside className="panel">
-          <h2>Inspector</h2>
+        <aside className={`panel${inspectorOpen ? " panel--open" : ""}`}>
+          <div className="panel__header">
+            <h2>Inspector</h2>
+            <button
+              type="button"
+              className="panel__close"
+              aria-label="Close inspector"
+              onClick={() => setInspectorOpen(false)}
+            >
+              <span className="material-symbols-rounded">close</span>
+            </button>
+          </div>
 
-          {editor.selectedNode ? (
+          {editor.selectedNodes.length > 1 ? (() => {
+            const nodes = editor.selectedNodes;
+            const commonRadius = nodes.every((n) => (n.borderRadius ?? 8) === (nodes[0].borderRadius ?? 8)) ? (nodes[0].borderRadius ?? 8) : null;
+            const commonBg = nodes.every((n) => (n.bgColor ?? "") === (nodes[0].bgColor ?? "")) ? (nodes[0].bgColor ?? "") : null;
+            const commonBorderW = nodes.every((n) => (n.borderWidth ?? 1) === (nodes[0].borderWidth ?? 1)) ? (nodes[0].borderWidth ?? 1) : null;
+            const commonBorderC = nodes.every((n) => (n.borderColor ?? "") === (nodes[0].borderColor ?? "")) ? (nodes[0].borderColor ?? "") : null;
+            const commonText = nodes.every((n) => (n.textColor ?? "") === (nodes[0].textColor ?? "")) ? (nodes[0].textColor ?? "") : null;
+            const applyStyle = (style: Parameters<typeof editor.updateMultipleNodeStyles>[1]) =>
+              editor.updateMultipleNodeStyles(editor.selectedNodeIds, style);
+
+            return (
+              <div className="inspector-node">
+                <p style={{ fontWeight: 600, fontSize: 14, margin: "0 0 8px" }}>
+                  {nodes.length} nodes selected
+                </p>
+
+                <div className="inspector-row">
+                  <label className="inspector-label">Radius</label>
+                  <div className="layout-mode-btns">
+                    {(
+                      [
+                        { value: 0, icon: "crop_square", title: "Sharp" },
+                        { value: 8, icon: "rounded_corner", title: "Rounded" },
+                        { value: 999, icon: "circle", title: "Pill" },
+                      ] as const
+                    ).map(({ value, icon, title }) => (
+                      <button
+                        key={value}
+                        type="button"
+                        title={title}
+                        className={`layout-mode-btn${commonRadius === value ? " layout-mode-btn--active" : ""}`}
+                        onClick={() => applyStyle({ borderRadius: value === 8 ? undefined : value })}
+                      >
+                        <span className="material-symbols-rounded">{icon}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="number"
+                    min={0}
+                    max={999}
+                    value={commonRadius ?? ""}
+                    placeholder="-"
+                    style={{ width: 52 }}
+                    onChange={(e) => applyStyle({ borderRadius: Number(e.target.value) === 8 ? undefined : Number(e.target.value) })}
+                  />
+                </div>
+
+                <div className="inspector-row">
+                  <label className="inspector-label">Fill</label>
+                  <button
+                    type="button"
+                    className={`inspector-preset-btn${commonBg === "transparent" ? " inspector-preset-btn--active" : ""}`}
+                    title="No fill (transparent)"
+                    onClick={() => applyStyle({ bgColor: "transparent" })}
+                  >
+                    <span className="material-symbols-rounded">block</span>
+                  </button>
+                  <input
+                    type="color"
+                    value={commonBg && commonBg !== "transparent" ? commonBg : "#ffffff"}
+                    onChange={(e) => applyStyle({ bgColor: e.target.value })}
+                  />
+                  <button type="button" className="inspector-clear" title="Reset to theme default" onClick={() => applyStyle({ bgColor: undefined })}>
+                    <span className="material-symbols-rounded">restart_alt</span>
+                  </button>
+                </div>
+
+                <div className="inspector-row">
+                  <label className="inspector-label">Border</label>
+                  <button
+                    type="button"
+                    className={`inspector-preset-btn${commonBorderW === 0 ? " inspector-preset-btn--active" : ""}`}
+                    title="No border"
+                    onClick={() => applyStyle({ borderWidth: 0, borderColor: undefined })}
+                  >
+                    <span className="material-symbols-rounded">block</span>
+                  </button>
+                  <input
+                    type="number"
+                    min={0}
+                    max={16}
+                    value={commonBorderW ?? ""}
+                    placeholder="-"
+                    style={{ width: 52 }}
+                    onChange={(e) => applyStyle({ borderWidth: Number(e.target.value) })}
+                  />
+                  <input
+                    type="color"
+                    value={commonBorderC || "#6b7280"}
+                    onChange={(e) => applyStyle({ borderColor: e.target.value })}
+                  />
+                  <button type="button" className="inspector-clear" title="Reset to default" onClick={() => applyStyle({ borderWidth: undefined, borderColor: undefined })}>
+                    <span className="material-symbols-rounded">restart_alt</span>
+                  </button>
+                </div>
+
+                <div className="inspector-row">
+                  <label className="inspector-label">Text</label>
+                  <input
+                    type="color"
+                    value={commonText || "#111827"}
+                    onChange={(e) => applyStyle({ textColor: e.target.value })}
+                  />
+                  <button type="button" className="inspector-clear" title="Reset to default" onClick={() => applyStyle({ textColor: undefined })}>
+                    <span className="material-symbols-rounded">restart_alt</span>
+                  </button>
+                </div>
+
+                <div className="inspector-row">
+                  <label className="inspector-label">Layout</label>
+                  <div className="layout-mode-btns">
+                    {(
+                      [
+                        { value: "", icon: "remove", title: "Inherit" },
+                        { value: "balanced", icon: "hub", title: "Balanced" },
+                        { value: "right", icon: "east", title: "Right" },
+                        { value: "left", icon: "west", title: "Left" },
+                        { value: "down", icon: "south", title: "Down" },
+                        { value: "up", icon: "north", title: "Up" },
+                      ] as const
+                    ).map(({ value, icon, title }) => (
+                      <button
+                        key={value}
+                        type="button"
+                        title={title}
+                        className="layout-mode-btn"
+                        onClick={() => applyStyle({ nodeLayout: (value as LayoutMode) || undefined })}
+                      >
+                        <span className="material-symbols-rounded">{icon}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })() : editor.selectedNode ? (
             <div className="inspector-node">
               <InspectorTitle
                 key={editor.selectedNode.id}
