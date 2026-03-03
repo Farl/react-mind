@@ -786,6 +786,11 @@ button:disabled {
   background: #f1f5f9;
 }
 
+.layout-category-hint {
+  font-size: 11px;
+  color: #6b7280;
+}
+
 .palette-row {
   display: flex;
   gap: 10px;

@@ -522,10 +522,26 @@ const buildEdgePathRounded = (
 const buildEdgePathTree = (
   x1: number, y1: number, x2: number, y2: number,
   direction: PositionedNode["direction"],
+  bottomStart = false,
 ): string => {
   const dy = y2 - y1;
   const dx = x2 - x1;
   if (Math.abs(dy) < 1 && Math.abs(dx) < 1) return `M ${x1} ${y1}`;
+
+  // Bottom-start horizontal tree: V down from parent bottom, turn, H to child
+  if (bottomStart) {
+    const r = Math.min(6, Math.abs(dx) / 2, Math.abs(dy) / 2);
+    const sx = dx > 0 ? 1 : -1;
+    if (r < 1) {
+      return `M ${x1} ${y1} V ${y2} H ${x2}`;
+    }
+    return [
+      `M ${x1} ${y1}`,
+      `V ${y2 - r}`,
+      `Q ${x1} ${y2} ${x1 + r * sx} ${y2}`,
+      `H ${x2}`,
+    ].join(" ");
+  }
 
   const isVertical = direction === "down" || direction === "up";
 
@@ -571,8 +587,9 @@ const buildEdgePath = (
   direction: PositionedNode["direction"],
   style: EdgeStyle = "curve",
   treeMode = false,
+  bottomStart = false,
 ): string => {
-  if (treeMode) return buildEdgePathTree(x1, y1, x2, y2, direction);
+  if (treeMode) return buildEdgePathTree(x1, y1, x2, y2, direction, bottomStart);
   switch (style) {
     case "straight": return buildEdgePathStraight(x1, y1, x2, y2);
     case "orthogonal": return buildEdgePathOrthogonal(x1, y1, x2, y2, direction);
@@ -1243,7 +1260,15 @@ export function MindmapCanvas({
                 const branchClass = branchIdx !== undefined ? ` mindmap-branch--${branchIdx}` : "";
 
                 let x1: number, y1: number, x2: number, y2: number;
-                if (item.direction === "down") {
+                if (item.aligned && (item.direction === "right" || item.direction === "left")) {
+                  // Horizontal tree chart: edge departs from parent bottom center (XMind style)
+                  x1 = parent.x + parent.width / 2 + offsetX;
+                  y1 = parent.y + parent.height + offsetY;
+                  x2 = item.direction === "right"
+                    ? item.x + offsetX
+                    : item.x + item.width + offsetX;
+                  y2 = item.y + item.height / 2 + offsetY;
+                } else if (item.direction === "down") {
                   x1 = parent.x + parent.width / 2 + offsetX;
                   y1 = parent.y + parent.height + offsetY;
                   x2 = item.x + item.width / 2 + offsetX;
@@ -1268,7 +1293,8 @@ export function MindmapCanvas({
                 const edgeStyle = item.node.edgeStyle ?? "curve";
                 const edgeEnd = item.node.edgeEnd ?? "none";
                 const treeMode = item.aligned === true;
-                const d = buildEdgePath(x1, y1, x2, y2, item.direction, edgeStyle, treeMode);
+                const bottomStart = treeMode && (item.direction === "right" || item.direction === "left");
+                const d = buildEdgePath(x1, y1, x2, y2, item.direction, edgeStyle, treeMode, bottomStart);
 
                 const inlineStyle: React.CSSProperties = {};
                 if (item.node.edgeWidth != null) inlineStyle.strokeWidth = item.node.edgeWidth;

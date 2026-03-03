@@ -1388,34 +1388,51 @@ export function EditorShell({ appName }: EditorShellProps) {
                   <summary>Structure</summary>
                   <div className="inspector-section__body">
                     <div className="inspector-row">
-                      <label className="inspector-label">Layout</label>
-                      <div className="layout-mode-btns">
-                        {(
-                          [
-                            { value: "", icon: "remove", title: "Inherit" },
-                            { value: "balanced", icon: "hub", title: "Balanced" },
-                            { value: "right", icon: "east", title: "Right" },
-                            { value: "left", icon: "west", title: "Left" },
-                            { value: "down", icon: "south", title: "Down" },
-                            { value: "up", icon: "north", title: "Up" },
-                            { value: "right-aligned", icon: "subdirectory_arrow_right", title: "Tree Right" },
-                            { value: "left-aligned", icon: "subdirectory_arrow_left", title: "Tree Left" },
-                            { value: "down-aligned", icon: "account_tree", title: "Tree Down" },
-                            { value: "up-aligned", icon: "device_hub", title: "Tree Up" },
-                          ] as const
-                        ).map(({ value, icon, title }) => (
-                          <button
-                            key={value}
-                            type="button"
-                            title={title}
-                            className={`layout-mode-btn${commonLayout === value ? " layout-mode-btn--active" : ""}`}
-                            onClick={() => applyStyle({ nodeLayout: (value as LayoutMode) || undefined })}
-                          >
-                            <span className="material-symbols-rounded">{icon}</span>
-                          </button>
-                        ))}
-                      </div>
+                      <button
+                        type="button"
+                        title="Inherit"
+                        className={`layout-mode-btn${commonLayout === "" ? " layout-mode-btn--active" : ""}`}
+                        onClick={() => applyStyle({ nodeLayout: undefined })}
+                      >
+                        <span className="material-symbols-rounded">close</span>
+                      </button>
+                      <span className="layout-category-hint">Inherit</span>
                     </div>
+
+                    {([
+                      { label: "Logic Chart", modes: [
+                        { value: "balanced", icon: "hub", title: "Balanced" },
+                        { value: "right", icon: "east", title: "Right" },
+                        { value: "left", icon: "west", title: "Left" },
+                      ]},
+                      { label: "Org Chart", modes: [
+                        { value: "down", icon: "south", title: "Down" },
+                        { value: "up", icon: "north", title: "Up" },
+                      ]},
+                      { label: "Tree Chart", modes: [
+                        { value: "right-aligned", icon: "subdirectory_arrow_right", title: "Right" },
+                        { value: "left-aligned", icon: "subdirectory_arrow_left", title: "Left" },
+                        { value: "down-aligned", icon: "account_tree", title: "Down" },
+                        { value: "up-aligned", icon: "device_hub", title: "Up" },
+                      ]},
+                    ] as const).map(({ label, modes }) => (
+                      <div key={label} className="inspector-row">
+                        <label className="inspector-label">{label}</label>
+                        <div className="layout-mode-btns">
+                          {modes.map(({ value, icon, title }) => (
+                            <button
+                              key={value}
+                              type="button"
+                              title={title}
+                              className={`layout-mode-btn${commonLayout === value ? " layout-mode-btn--active" : ""}`}
+                              onClick={() => applyStyle({ nodeLayout: value as LayoutMode })}
+                            >
+                              <span className="material-symbols-rounded">{icon}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </details>
               </div>
