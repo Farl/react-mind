@@ -862,7 +862,8 @@ export function MindmapCanvas({
     }
 
     // Right-click (or ctrl+click) → pan
-    if (event.button === 2) {
+    // Touch on empty canvas → pan (no RMB on mobile)
+    if (event.button === 2 || event.pointerType === "touch") {
       viewportRef.current.setPointerCapture(event.pointerId);
       setIsPanning(true);
       lastPointerRef.current = { x: event.clientX, y: event.clientY };
@@ -1011,6 +1012,10 @@ export function MindmapCanvas({
       return;
     }
 
+    // Tap on empty canvas (pan started but didn't move) → deselect
+    if (isPanning && !panMovedRef.current) {
+      onSelectNode(null);
+    }
     setIsPanning(false);
     lastPointerRef.current = null;
   };
