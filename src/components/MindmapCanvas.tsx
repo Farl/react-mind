@@ -11,6 +11,9 @@ type PositionedNode = {
   height: number;
   direction: "left" | "right" | "root" | "down" | "up";
   aligned?: boolean; // true = tree-chart mode (parent at top, trunk edges)
+  /** The parent's aligned & direction values — used for edge rendering to parent */
+  parentAligned?: boolean;
+  parentDirection?: "left" | "right" | "root" | "down" | "up";
 };
 
 type MindmapCanvasProps = {
@@ -38,7 +41,6 @@ const V_GAP = 22;
 const BETWEEN_GAP = H_GAP - NODE_WIDTH; // 10px
 // Tree-chart (aligned) layout uses wider gaps to accommodate the trunk line
 const TREE_BETWEEN_GAP = 42;
-const TREE_H_GAP = NODE_WIDTH + TREE_BETWEEN_GAP; // 212
 const CANVAS_PAD = 80;
 // Vertical layout constants
 const V_LEVEL_GAP = 64; // gap between depth levels (top-to-bottom)
@@ -79,104 +81,112 @@ const groupByParent = (nodes: MindmapNode[]) => {
   return childrenMap;
 };
 
+// Resolve a node's axis ("h" or "v") and aligned flag from its override + inherited values
+const resolveAxisAligned = (
+  ov: string | null,
+  inheritedAxis: "h" | "v",
+  inheritedAligned: boolean,
+): { axis: "h" | "v"; aligned: boolean } => {
+  let axis = inheritedAxis;
+  let aligned = inheritedAligned;
+  if (ov === "right-aligned" || ov === "left-aligned") { axis = "h"; aligned = true; }
+  else if (ov === "right" || ov === "left" || ov === "balanced") { axis = "h"; aligned = false; }
+  else if (ov === "down-aligned" || ov === "up-aligned") { axis = "v"; aligned = true; }
+  else if (ov === "down" || ov === "up") { axis = "v"; aligned = false; }
+  return { axis, aligned };
+};
+
+// Unified subtree-height with cross-axis support
 const buildSubtreeHeight = (
   nodeId: string,
   childrenMap: Map<string | null, MindmapNode[]>,
+  nodeMap: Map<string, MindmapNode>,
   collapsedNodeIds: Set<string>,
+  inheritedAxis: "h" | "v",
+  inheritedAligned: boolean,
 ): number => {
-  if (collapsedNodeIds.has(nodeId)) {
-    return NODE_HEIGHT;
-  }
-
+  if (collapsedNodeIds.has(nodeId)) return NODE_HEIGHT;
+  const node = nodeMap.get(nodeId);
+  const { axis, aligned } = resolveAxisAligned(node?.nodeLayout ?? null, inheritedAxis, inheritedAligned);
   const children = childrenMap.get(nodeId) || [];
-  if (children.length === 0) {
-    return NODE_HEIGHT;
-  }
-
-  const childHeights: number[] = children.map((child) =>
-    buildSubtreeHeight(child.id, childrenMap, collapsedNodeIds),
+  if (children.length === 0) return NODE_HEIGHT;
+  const childHeights = children.map((c) =>
+    buildSubtreeHeight(c.id, childrenMap, nodeMap, collapsedNodeIds, axis, aligned),
   );
-  return childHeights.reduce((sum: number, h: number) => sum + h, 0) + V_GAP * (children.length - 1);
+  if (axis === "v") {
+    // Vertical: children side by side → height = node + gap + deepest child
+    return NODE_HEIGHT + V_LEVEL_GAP + Math.max(...childHeights);
+  }
+  // Horizontal: children stacked vertically
+  const childrenTotal = childHeights.reduce((s, h) => s + h, 0) + V_GAP * (children.length - 1);
+  return aligned ? NODE_HEIGHT + V_GAP + childrenTotal : childrenTotal;
 };
 
 const computeGroupHeight = (
   nodes: MindmapNode[],
   childrenMap: Map<string | null, MindmapNode[]>,
+  nodeMap: Map<string, MindmapNode>,
   collapsedNodeIds: Set<string>,
+  inheritedAxis: "h" | "v",
+  inheritedAligned: boolean,
 ): number => {
   if (nodes.length === 0) return 0;
-  const heights = nodes.map((n) => buildSubtreeHeight(n.id, childrenMap, collapsedNodeIds));
-  return heights.reduce((sum, h) => sum + h, 0) + V_GAP * (nodes.length - 1);
-};
-
-const buildSubtreeHeightAligned = (
-  nodeId: string,
-  childrenMap: Map<string | null, MindmapNode[]>,
-  collapsedNodeIds: Set<string>,
-): number => {
-  if (collapsedNodeIds.has(nodeId)) return NODE_HEIGHT;
-  const children = childrenMap.get(nodeId) || [];
-  if (children.length === 0) return NODE_HEIGHT;
-  const childHeights = children.map((c) => buildSubtreeHeightAligned(c.id, childrenMap, collapsedNodeIds));
-  return NODE_HEIGHT + V_GAP + childHeights.reduce((s, h) => s + h, 0) + V_GAP * (children.length - 1);
-};
-
-const computeGroupHeightAligned = (
-  nodes: MindmapNode[],
-  childrenMap: Map<string | null, MindmapNode[]>,
-  collapsedNodeIds: Set<string>,
-): number => {
-  if (nodes.length === 0) return 0;
-  const heights = nodes.map((n) => buildSubtreeHeightAligned(n.id, childrenMap, collapsedNodeIds));
+  const heights = nodes.map((n) =>
+    buildSubtreeHeight(n.id, childrenMap, nodeMap, collapsedNodeIds, inheritedAxis, inheritedAligned),
+  );
   return heights.reduce((s, h) => s + h, 0) + V_GAP * (nodes.length - 1);
 };
 
-const buildSubtreeWidthAligned = (
-  nodeId: string,
-  childrenMap: Map<string | null, MindmapNode[]>,
-  collapsedNodeIds: Set<string>,
-): number => {
-  if (collapsedNodeIds.has(nodeId)) return NODE_WIDTH;
-  const children = childrenMap.get(nodeId) || [];
-  if (children.length === 0) return NODE_WIDTH;
-  const widths = children.map((c) => buildSubtreeWidthAligned(c.id, childrenMap, collapsedNodeIds));
-  const childrenTotal = widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (children.length - 1);
-  return Math.max(NODE_WIDTH, childrenTotal);
-};
-
-const computeGroupWidthAligned = (
-  nodes: MindmapNode[],
-  childrenMap: Map<string | null, MindmapNode[]>,
-  collapsedNodeIds: Set<string>,
-): number => {
-  if (nodes.length === 0) return 0;
-  const widths = nodes.map((n) => buildSubtreeWidthAligned(n.id, childrenMap, collapsedNodeIds));
-  return widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (nodes.length - 1);
-};
-
+// Unified subtree-width with cross-axis support
 const buildSubtreeWidth = (
   nodeId: string,
   childrenMap: Map<string | null, MindmapNode[]>,
+  nodeMap: Map<string, MindmapNode>,
   collapsedNodeIds: Set<string>,
+  inheritedAxis: "h" | "v",
+  inheritedAligned: boolean,
 ): number => {
   if (collapsedNodeIds.has(nodeId)) return NODE_WIDTH;
+  const node = nodeMap.get(nodeId);
+  const { axis, aligned } = resolveAxisAligned(node?.nodeLayout ?? null, inheritedAxis, inheritedAligned);
   const children = childrenMap.get(nodeId) || [];
   if (children.length === 0) return NODE_WIDTH;
-  const widths = children.map((c) => buildSubtreeWidth(c.id, childrenMap, collapsedNodeIds));
-  return widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (children.length - 1);
+  const widths = children.map((c) =>
+    buildSubtreeWidth(c.id, childrenMap, nodeMap, collapsedNodeIds, axis, aligned),
+  );
+  if (axis === "h") {
+    // Horizontal: children stacked vertically → width = node + gap + widest child
+    const gap = aligned ? TREE_BETWEEN_GAP : BETWEEN_GAP;
+    return NODE_WIDTH + gap + Math.max(...widths);
+  }
+  // Vertical: children spread horizontally
+  const childrenTotal = widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (children.length - 1);
+  return Math.max(NODE_WIDTH, childrenTotal);
 };
 
 const computeGroupWidth = (
   nodes: MindmapNode[],
   childrenMap: Map<string | null, MindmapNode[]>,
+  nodeMap: Map<string, MindmapNode>,
   collapsedNodeIds: Set<string>,
+  inheritedAxis: "h" | "v",
+  inheritedAligned: boolean,
 ): number => {
   if (nodes.length === 0) return 0;
-  const widths = nodes.map((n) => buildSubtreeWidth(n.id, childrenMap, collapsedNodeIds));
+  const widths = nodes.map((n) =>
+    buildSubtreeWidth(n.id, childrenMap, nodeMap, collapsedNodeIds, inheritedAxis, inheritedAligned),
+  );
   return widths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (nodes.length - 1);
 };
 
 const isAlignedMode = (m: string) => m === "right-aligned" || m === "left-aligned" || m === "down-aligned" || m === "up-aligned";
+
+const isVerticalOv = (ov: string | null): boolean =>
+  ov === "down" || ov === "up" || ov === "down-aligned" || ov === "up-aligned";
+
+const isHorizontalOv = (ov: string | null): boolean =>
+  ov === "right" || ov === "left" || ov === "balanced"
+  || ov === "right-aligned" || ov === "left-aligned";
 
 const layoutNodesHorizontal = (
   nodes: MindmapNode[],
@@ -185,7 +195,17 @@ const layoutNodesHorizontal = (
   layoutMode: "balanced" | "right" | "left" | "right-aligned" | "left-aligned",
 ): PositionedNode[] => {
   const childrenMap = groupByParent(nodes);
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
   const positioned = new Map<string, PositionedNode>();
+
+  const heightFn = (id: string, aligned: boolean) =>
+    buildSubtreeHeight(id, childrenMap, nodeMap, collapsedNodeIds, "h", aligned);
+
+  const groupHeightFn = (group: MindmapNode[], aligned: boolean) =>
+    computeGroupHeight(group, childrenMap, nodeMap, collapsedNodeIds, "h", aligned);
+
+  const vWidthFn = (id: string, aligned: boolean) =>
+    buildSubtreeWidth(id, childrenMap, nodeMap, collapsedNodeIds, "v", aligned);
 
   roots.forEach((root, rootIdx) => {
     const rootLayoutX = root.x ?? rootIdx * 800;
@@ -220,23 +240,55 @@ const layoutNodesHorizontal = (
       direction: "root",
     });
 
-    // Selectors for aligned vs centered height calculations
-    const heightFn = (id: string, aligned: boolean) =>
-      aligned
-        ? buildSubtreeHeightAligned(id, childrenMap, collapsedNodeIds)
-        : buildSubtreeHeight(id, childrenMap, collapsedNodeIds);
-
-    const groupHeightFn = (group: MindmapNode[], aligned: boolean) =>
-      aligned
-        ? computeGroupHeightAligned(group, childrenMap, collapsedNodeIds)
-        : computeGroupHeight(group, childrenMap, collapsedNodeIds);
-
-    const placeSubtree = (nodeId: string, topAbsolute: number, dir: "left" | "right", depth: number, aligned: boolean): number => {
-      const node = nodes.find((n) => n.id === nodeId);
+    // Use function declarations so placeHSubtree ↔ placeVSubtree can mutually recurse
+    function placeHSubtree(nodeId: string, topAbsolute: number, dir: "left" | "right", parentX: number, parentWidth: number, aligned: boolean): number {
+      const node = nodeMap.get(nodeId);
       if (!node) return 0;
 
-      // Per-node override: if this node has its own aligned layout, switch
+      const parentAligned = aligned;
+      const parentDir = dir;
       const nodeOverride = node.nodeLayout ?? null;
+
+      // ── Cross-axis switch: horizontal → vertical ──
+      if (isVerticalOv(nodeOverride)) {
+        const vDir: "down" | "up" = (nodeOverride === "down" || nodeOverride === "down-aligned") ? "down" : "up";
+        const vAligned = nodeOverride === "down-aligned" || nodeOverride === "up-aligned";
+
+        const subtreeH = buildSubtreeHeight(nodeId, childrenMap, nodeMap, collapsedNodeIds, "h", aligned);
+        const gap = aligned ? TREE_BETWEEN_GAP : BETWEEN_GAP;
+        const x = dir === "right"
+          ? parentX + parentWidth + gap
+          : parentX - gap - NODE_WIDTH;
+        // Edge-align so vertical children stay within allocated height:
+        // "down" → top-aligned, "up" → bottom-aligned
+        const y = vDir === "down"
+          ? topAbsolute
+          : topAbsolute + subtreeH - NODE_HEIGHT;
+
+        positioned.set(nodeId, {
+          node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT,
+          direction: vDir, aligned: vAligned,
+          parentAligned, parentDirection: parentDir,
+        });
+
+        if (!collapsedNodeIds.has(nodeId)) {
+          const children = childrenMap.get(nodeId) || [];
+          if (children.length > 0) {
+            const childWidths = children.map((c) => vWidthFn(c.id, vAligned));
+            const totalChildW = childWidths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (children.length - 1);
+            // Align children so they don't overflow into parent's space:
+            // right-going / aligned → left-align with node; left-going → right-align
+            let cx = (vAligned || dir === "right") ? x : x + NODE_WIDTH - totalChildW;
+            children.forEach((child, i) => {
+              placeVSubtree(child.id, cx, y, NODE_HEIGHT, vDir, vAligned);
+              cx += childWidths[i] + H_NODE_GAP;
+            });
+          }
+        }
+        return subtreeH;
+      }
+
+      // ── Normal horizontal placement ──
       let localAligned = aligned;
       let localDir = dir;
       if (nodeOverride === "right-aligned") { localAligned = true; localDir = "right"; }
@@ -249,15 +301,13 @@ const layoutNodesHorizontal = (
         ? topAbsolute
         : topAbsolute + subtreeH / 2 - NODE_HEIGHT / 2;
 
-      // Tree-chart uses wider gaps; standard layout uses H_GAP
-      const betweenGap = localAligned ? TREE_BETWEEN_GAP : BETWEEN_GAP;
-      const hGap = localAligned ? TREE_H_GAP : H_GAP;
+      const gap = localAligned ? TREE_BETWEEN_GAP : BETWEEN_GAP;
       const x =
         localDir === "right"
-          ? rootLayoutX + ROOT_NODE_WIDTH + betweenGap + (depth - 1) * hGap
-          : rootLayoutX - betweenGap - NODE_WIDTH - (depth - 1) * hGap;
+          ? parentX + parentWidth + gap
+          : parentX - gap - NODE_WIDTH;
 
-      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: localDir, aligned: localAligned });
+      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: localDir, aligned: localAligned, parentAligned, parentDirection: parentDir });
 
       if (!collapsedNodeIds.has(nodeId)) {
         const children = childrenMap.get(nodeId) || [];
@@ -271,7 +321,7 @@ const layoutNodesHorizontal = (
             ? topAbsolute + NODE_HEIGHT + V_GAP
             : topAbsolute + subtreeH / 2 - rightGroupH / 2;
           rightKids.forEach((child) => {
-            const h = placeSubtree(child.id, cursor, "right", depth + 1, localAligned);
+            const h = placeHSubtree(child.id, cursor, "right", x, NODE_WIDTH, localAligned);
             cursor += h + V_GAP;
           });
           const leftGroupH = groupHeightFn(leftKids, localAligned);
@@ -279,7 +329,7 @@ const layoutNodesHorizontal = (
             ? topAbsolute + NODE_HEIGHT + V_GAP + rightGroupH + (rightKids.length > 0 ? V_GAP : 0)
             : topAbsolute + subtreeH / 2 - leftGroupH / 2;
           leftKids.forEach((child) => {
-            const h = placeSubtree(child.id, cursor, "left", depth + 1, localAligned);
+            const h = placeHSubtree(child.id, cursor, "left", x, NODE_WIDTH, localAligned);
             cursor += h + V_GAP;
           });
         } else {
@@ -290,21 +340,91 @@ const layoutNodesHorizontal = (
           const childAligned = isAlignedMode(nodeOverride ?? "") ? true : localAligned;
           let cursor = localAligned ? topAbsolute + NODE_HEIGHT + V_GAP : topAbsolute;
           children.forEach((child) => {
-            const h = placeSubtree(child.id, cursor, childDir, depth + 1, childAligned);
+            const h = placeHSubtree(child.id, cursor, childDir, x, NODE_WIDTH, childAligned);
             cursor += h + V_GAP;
           });
         }
       }
 
       return subtreeH;
-    };
+    }
+
+    // Place a node in vertical mode (used when cross-axis switch from horizontal → vertical)
+    function placeVSubtree(nodeId: string, leftEdge: number, parentY: number, parentHeight: number, vDir: "down" | "up", aligned: boolean): void {
+      const node = nodeMap.get(nodeId);
+      if (!node) return;
+
+      const parentAligned = aligned;
+      const nodeOverride = node.nodeLayout ?? null;
+
+      if (isHorizontalOv(nodeOverride)) {
+        const hDir: "left" | "right" = (nodeOverride === "left" || nodeOverride === "left-aligned") ? "left" : "right";
+        const hAligned = isAlignedMode(nodeOverride!);
+
+        const sw = vWidthFn(nodeId, aligned);
+        // Edge-align so horizontal children stay within allocated width:
+        // right-going → left-align, left-going → right-align
+        const x = hDir === "right" ? leftEdge : leftEdge + sw - NODE_WIDTH;
+        const y = vDir === "down"
+          ? parentY + parentHeight + V_LEVEL_GAP
+          : parentY - V_LEVEL_GAP - NODE_HEIGHT;
+
+        positioned.set(nodeId, {
+          node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT,
+          direction: hDir, aligned: hAligned,
+          parentAligned, parentDirection: vDir,
+        });
+
+        if (!collapsedNodeIds.has(nodeId)) {
+          const children = childrenMap.get(nodeId) || [];
+          if (children.length > 0) {
+            const chHeights = children.map((c) =>
+              buildSubtreeHeight(c.id, childrenMap, nodeMap, collapsedNodeIds, "h", hAligned));
+            const groupH = chHeights.reduce((s, h) => s + h, 0) + V_GAP * (children.length - 1);
+            let cursor = hAligned ? y + NODE_HEIGHT + V_GAP : y + NODE_HEIGHT / 2 - groupH / 2;
+            children.forEach((child) => {
+              const h = placeHSubtree(child.id, cursor, hDir, x, NODE_WIDTH, hAligned);
+              cursor += h + V_GAP;
+            });
+          }
+        }
+        return;
+      }
+
+      // Normal vertical placement
+      let localAligned = aligned;
+      if (nodeOverride === "down-aligned" || nodeOverride === "up-aligned") localAligned = true;
+      else if (nodeOverride === "down" || nodeOverride === "up") localAligned = false;
+
+      const sw = vWidthFn(nodeId, localAligned);
+      const x = localAligned ? leftEdge : leftEdge + sw / 2 - NODE_WIDTH / 2;
+      const y = vDir === "down"
+        ? parentY + parentHeight + V_LEVEL_GAP
+        : parentY - V_LEVEL_GAP - NODE_HEIGHT;
+
+      positioned.set(nodeId, {
+        node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT,
+        direction: vDir, aligned: localAligned,
+        parentAligned, parentDirection: vDir,
+      });
+
+      if (!collapsedNodeIds.has(nodeId)) {
+        const children = childrenMap.get(nodeId) || [];
+        const childWidths = children.map((c) => vWidthFn(c.id, localAligned));
+        let csr = leftEdge;
+        children.forEach((child, i) => {
+          placeVSubtree(child.id, csr, y, NODE_HEIGHT, vDir, localAligned);
+          csr += childWidths[i] + H_NODE_GAP;
+        });
+      }
+    }
 
     const rightGroupH = groupHeightFn(rightChildren, rootAligned);
     let cursor = rootAligned
       ? rootLayoutY + ROOT_NODE_HEIGHT + V_GAP
       : rootLayoutY + ROOT_NODE_HEIGHT / 2 - rightGroupH / 2;
     rightChildren.forEach((child) => {
-      const h = placeSubtree(child.id, cursor, "right", 1, rootAligned);
+      const h = placeHSubtree(child.id, cursor, "right", rootLayoutX, ROOT_NODE_WIDTH, rootAligned);
       cursor += h + V_GAP;
     });
 
@@ -314,7 +434,7 @@ const layoutNodesHorizontal = (
     }
     // If rootAligned, cursor already continues from right children
     leftChildren.forEach((child) => {
-      const h = placeSubtree(child.id, cursor, "left", 1, rootAligned);
+      const h = placeHSubtree(child.id, cursor, "left", rootLayoutX, ROOT_NODE_WIDTH, rootAligned);
       cursor += h + V_GAP;
     });
   });
@@ -335,15 +455,16 @@ const layoutNodesVertical = (
   const baseDir: "down" | "up" = mode === "down" || mode === "down-aligned" ? "down" : "up";
   const rootAligned = isAlignedVertical(mode);
 
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
   const widthFn = (id: string, aligned: boolean) =>
-    aligned
-      ? buildSubtreeWidthAligned(id, childrenMap, collapsedNodeIds)
-      : buildSubtreeWidth(id, childrenMap, collapsedNodeIds);
+    buildSubtreeWidth(id, childrenMap, nodeMap, collapsedNodeIds, "v", aligned);
 
   const groupWidthFn = (group: MindmapNode[], aligned: boolean) =>
-    aligned
-      ? computeGroupWidthAligned(group, childrenMap, collapsedNodeIds)
-      : computeGroupWidth(group, childrenMap, collapsedNodeIds);
+    computeGroupWidth(group, childrenMap, nodeMap, collapsedNodeIds, "v", aligned);
+
+  const hHeightFn = (id: string, aligned: boolean) =>
+    buildSubtreeHeight(id, childrenMap, nodeMap, collapsedNodeIds, "h", aligned);
 
   roots.forEach((root, rootIdx) => {
     const rootLayoutX = root.x ?? rootIdx * 800;
@@ -366,40 +487,158 @@ const layoutNodesVertical = (
       direction: "root",
     });
 
-    const placeSubtree = (nodeId: string, leftEdge: number, depth: number, aligned: boolean): void => {
-      const node = nodes.find((n) => n.id === nodeId);
+    function placeVSubtree(nodeId: string, leftEdge: number, parentY: number, parentHeight: number, aligned: boolean): void {
+      const node = nodeMap.get(nodeId);
       if (!node) return;
 
-      // Per-node override
-      let localAligned = aligned;
+      const parentAligned = aligned;
       const nodeOverride = node.nodeLayout ?? null;
+
+      // ── Cross-axis switch: vertical → horizontal ──
+      if (isHorizontalOv(nodeOverride)) {
+        const hDir: "left" | "right" = (nodeOverride === "left" || nodeOverride === "left-aligned") ? "left" : "right";
+        const hAligned = isAlignedMode(nodeOverride!);
+
+        const sw = widthFn(nodeId, aligned);
+        // Edge-align so horizontal children stay within allocated width
+        const x = hDir === "right" ? leftEdge : leftEdge + sw - NODE_WIDTH;
+        const y = baseDir === "down"
+          ? parentY + parentHeight + V_LEVEL_GAP
+          : parentY - V_LEVEL_GAP - NODE_HEIGHT;
+
+        positioned.set(nodeId, {
+          node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT,
+          direction: hDir, aligned: hAligned,
+          parentAligned, parentDirection: baseDir,
+        });
+
+        if (!collapsedNodeIds.has(nodeId)) {
+          const children = childrenMap.get(nodeId) || [];
+          if (children.length > 0) {
+            const chHeights = children.map((c) => hHeightFn(c.id, hAligned));
+            const groupH = chHeights.reduce((s, h) => s + h, 0) + V_GAP * Math.max(0, children.length - 1);
+            let hCursor = hAligned ? y + NODE_HEIGHT + V_GAP : y + NODE_HEIGHT / 2 - groupH / 2;
+            children.forEach((child) => {
+              const h = placeHSubtree(child.id, hCursor, hDir, x, NODE_WIDTH, hAligned);
+              hCursor += h + V_GAP;
+            });
+          }
+        }
+        return;
+      }
+
+      // ── Normal vertical placement ──
+      let localAligned = aligned;
       if (nodeOverride === "down-aligned" || nodeOverride === "up-aligned") localAligned = true;
       else if (nodeOverride === "down" || nodeOverride === "up") localAligned = false;
 
       const sw = widthFn(nodeId, localAligned);
       const x = localAligned ? leftEdge : leftEdge + sw / 2 - NODE_WIDTH / 2;
-      const y =
-        baseDir === "down"
-          ? rootLayoutY + ROOT_NODE_HEIGHT + V_LEVEL_GAP + (depth - 1) * (NODE_HEIGHT + V_LEVEL_GAP)
-          : rootLayoutY - V_LEVEL_GAP - NODE_HEIGHT - (depth - 1) * (NODE_HEIGHT + V_LEVEL_GAP);
+      const y = baseDir === "down"
+        ? parentY + parentHeight + V_LEVEL_GAP
+        : parentY - V_LEVEL_GAP - NODE_HEIGHT;
 
-      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: baseDir, aligned: localAligned });
+      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: baseDir, aligned: localAligned, parentAligned, parentDirection: baseDir });
 
       if (!collapsedNodeIds.has(nodeId)) {
         const children = childrenMap.get(nodeId) || [];
         let cursor = leftEdge;
         children.forEach((child) => {
           const childW = widthFn(child.id, localAligned);
-          placeSubtree(child.id, cursor, depth + 1, localAligned);
+          placeVSubtree(child.id, cursor, y, NODE_HEIGHT, localAligned);
           cursor += childW + H_NODE_GAP;
         });
       }
-    };
+    }
+
+    // Horizontal placement for cross-axis switch inside vertical tree
+    function placeHSubtree(nodeId: string, topAbsolute: number, dir: "left" | "right", parentX: number, parentWidth: number, aligned: boolean): number {
+      const node = nodeMap.get(nodeId);
+      if (!node) return 0;
+
+      const parentAligned = aligned;
+      const parentDir = dir;
+      const nodeOverride = node.nodeLayout ?? null;
+
+      if (isVerticalOv(nodeOverride)) {
+        const vDir: "down" | "up" = (nodeOverride === "down" || nodeOverride === "down-aligned") ? "down" : "up";
+        const vAligned = nodeOverride === "down-aligned" || nodeOverride === "up-aligned";
+        const subtreeH = buildSubtreeHeight(nodeId, childrenMap, nodeMap, collapsedNodeIds, "h", aligned);
+        const gap = aligned ? TREE_BETWEEN_GAP : BETWEEN_GAP;
+        const x = dir === "right"
+          ? parentX + parentWidth + gap
+          : parentX - gap - NODE_WIDTH;
+        // Edge-align for vertical subtree
+        const y = vDir === "down"
+          ? topAbsolute
+          : topAbsolute + subtreeH - NODE_HEIGHT;
+
+        positioned.set(nodeId, {
+          node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT,
+          direction: vDir, aligned: vAligned,
+          parentAligned, parentDirection: parentDir,
+        });
+
+        if (!collapsedNodeIds.has(nodeId)) {
+          const children = childrenMap.get(nodeId) || [];
+          if (children.length > 0) {
+            const childWidths = children.map((c) => widthFn(c.id, vAligned));
+            const totalChildW = childWidths.reduce((s, w) => s + w, 0) + H_NODE_GAP * (children.length - 1);
+            let cx: number;
+            if (vAligned || dir === "right") {
+              cx = x;
+            } else {
+              cx = x + NODE_WIDTH - totalChildW;
+            }
+            children.forEach((child, i) => {
+              placeVSubtree(child.id, cx, y, NODE_HEIGHT, vAligned);
+              cx += childWidths[i] + H_NODE_GAP;
+            });
+          }
+        }
+        return subtreeH;
+      }
+
+      // Normal horizontal placement
+      let localAligned = aligned;
+      let localDir = dir;
+      if (nodeOverride === "right-aligned") { localAligned = true; localDir = "right"; }
+      else if (nodeOverride === "left-aligned") { localAligned = true; localDir = "left"; }
+      else if (nodeOverride === "right") { localAligned = false; localDir = "right"; }
+      else if (nodeOverride === "left") { localAligned = false; localDir = "left"; }
+
+      const subtreeH = hHeightFn(nodeId, localAligned);
+      const y = localAligned
+        ? topAbsolute
+        : topAbsolute + subtreeH / 2 - NODE_HEIGHT / 2;
+      const gap = localAligned ? TREE_BETWEEN_GAP : BETWEEN_GAP;
+      const x = localDir === "right"
+        ? parentX + parentWidth + gap
+        : parentX - gap - NODE_WIDTH;
+
+      positioned.set(nodeId, { node, x, y, width: NODE_WIDTH, height: NODE_HEIGHT, direction: localDir, aligned: localAligned, parentAligned, parentDirection: parentDir });
+
+      if (!collapsedNodeIds.has(nodeId)) {
+        const children = childrenMap.get(nodeId) || [];
+        const childDir: "left" | "right" =
+          nodeOverride === "right" || nodeOverride === "right-aligned" ? "right"
+          : nodeOverride === "left" || nodeOverride === "left-aligned" ? "left"
+          : localDir;
+        const childAligned = isAlignedMode(nodeOverride ?? "") ? true : localAligned;
+        let hCursor = localAligned ? topAbsolute + NODE_HEIGHT + V_GAP : topAbsolute;
+        children.forEach((child) => {
+          const h = placeHSubtree(child.id, hCursor, childDir, x, NODE_WIDTH, childAligned);
+          hCursor += h + V_GAP;
+        });
+      }
+
+      return subtreeH;
+    }
 
     let cursor = childrenStartX;
     rootChildren.forEach((child) => {
       const childW = widthFn(child.id, rootAligned);
-      placeSubtree(child.id, cursor, 1, rootAligned);
+      placeVSubtree(child.id, cursor, rootLayoutY, ROOT_NODE_HEIGHT, rootAligned);
       cursor += childW + H_NODE_GAP;
     });
   });
@@ -1264,26 +1503,30 @@ export function MindmapCanvas({
                 const branchIdx = branchColorMap.get(item.node.id);
                 const branchClass = branchIdx !== undefined ? ` mindmap-branch--${branchIdx}` : "";
 
+                // Use parent's layout context for edge connection style
+                const edgeAligned = item.parentAligned ?? item.aligned;
+                const edgeDir = item.parentDirection ?? item.direction;
+
                 let x1: number, y1: number, x2: number, y2: number;
-                if (item.aligned && (item.direction === "right" || item.direction === "left")) {
+                if (edgeAligned && (edgeDir === "right" || edgeDir === "left")) {
                   // Horizontal tree chart: edge departs from parent bottom center (XMind style)
                   x1 = parent.x + parent.width / 2 + offsetX;
                   y1 = parent.y + parent.height + offsetY;
-                  x2 = item.direction === "right"
+                  x2 = edgeDir === "right"
                     ? item.x + offsetX
                     : item.x + item.width + offsetX;
                   y2 = item.y + item.height / 2 + offsetY;
-                } else if (item.direction === "down") {
+                } else if (edgeDir === "down") {
                   x1 = parent.x + parent.width / 2 + offsetX;
                   y1 = parent.y + parent.height + offsetY;
                   x2 = item.x + item.width / 2 + offsetX;
                   y2 = item.y + offsetY;
-                } else if (item.direction === "up") {
+                } else if (edgeDir === "up") {
                   x1 = parent.x + parent.width / 2 + offsetX;
                   y1 = parent.y + offsetY;
                   x2 = item.x + item.width / 2 + offsetX;
                   y2 = item.y + item.height + offsetY;
-                } else if (item.direction === "left") {
+                } else if (edgeDir === "left") {
                   x1 = parent.x + offsetX;
                   y1 = parent.y + parent.height / 2 + offsetY;
                   x2 = item.x + item.width + offsetX;
@@ -1297,9 +1540,9 @@ export function MindmapCanvas({
 
                 const edgeStyle = item.node.edgeStyle ?? "curve";
                 const edgeEnd = item.node.edgeEnd ?? "none";
-                const treeMode = item.aligned === true;
-                const bottomStart = treeMode && (item.direction === "right" || item.direction === "left");
-                const d = buildEdgePath(x1, y1, x2, y2, item.direction, edgeStyle, treeMode, bottomStart);
+                const treeMode = edgeAligned === true;
+                const bottomStart = treeMode && (edgeDir === "right" || edgeDir === "left");
+                const d = buildEdgePath(x1, y1, x2, y2, edgeDir, edgeStyle, treeMode, bottomStart);
 
                 const inlineStyle: React.CSSProperties = {};
                 if (item.node.edgeWidth != null) inlineStyle.strokeWidth = item.node.edgeWidth;
