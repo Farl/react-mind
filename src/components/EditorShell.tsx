@@ -99,6 +99,9 @@ export function EditorShell({ appName }: EditorShellProps) {
   const [selectedTheme, setSelectedTheme] = useState<string>(
     () => localStorage.getItem("reactMind.theme") || "classic",
   );
+  const [showWbsNumbers, setShowWbsNumbers] = useState<boolean>(
+    () => localStorage.getItem("reactMind.showWbsNumbers") === "true",
+  );
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const prevSelectedCountRef = useRef(0);
 
@@ -138,6 +141,10 @@ export function EditorShell({ appName }: EditorShellProps) {
     document.body.dataset.theme = selectedTheme === "classic" ? "" : selectedTheme;
     localStorage.setItem("reactMind.theme", selectedTheme);
   }, [selectedTheme]);
+
+  useEffect(() => {
+    localStorage.setItem("reactMind.showWbsNumbers", showWbsNumbers ? "true" : "false");
+  }, [showWbsNumbers]);
 
   // Auto-open inspector on mobile when selection goes from empty → non-empty
   useEffect(() => {
@@ -1026,6 +1033,16 @@ export function EditorShell({ appName }: EditorShellProps) {
                   ))}
                 </div>
                 <span className="canvas-overlay__sep" />
+                <button
+                  type="button"
+                  title={showWbsNumbers ? "Hide WBS numbers" : "Show WBS numbers"}
+                  aria-pressed={showWbsNumbers}
+                  className={`canvas-overlay__wbs-toggle${showWbsNumbers ? " canvas-overlay__wbs-toggle--active" : ""}`}
+                  onClick={() => setShowWbsNumbers((v) => !v)}
+                >
+                  WBS
+                </button>
+                <span className="canvas-overlay__sep" />
                 <span className="canvas-overlay__hint" title="Tab=child  Enter=sibling  Del/Backspace=delete  Arrows=navigate  Ctrl+Z/Y=undo/redo  Dbl-click=rename/new root">
                   <span className="material-symbols-rounded">keyboard</span>
                 </span>
@@ -1036,6 +1053,7 @@ export function EditorShell({ appName }: EditorShellProps) {
                 collapsedNodeIds={editor.collapsedNodeIds}
                 editable={canEditGraph}
                 layoutMode={layoutMode}
+                showWbsNumbers={showWbsNumbers}
                 onSelectNode={editor.selectNode}
                 onToggleNodeSelection={editor.toggleNodeSelection}
                 onSelectNodes={editor.selectNodes}

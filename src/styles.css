@@ -728,6 +728,31 @@ button:disabled {
   font-size: 18px;
 }
 
+/* WBS toggle button in canvas overlay */
+.canvas-overlay__wbs-toggle {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border: 1.5px solid #d1d5db;
+  border-radius: 6px;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.canvas-overlay__wbs-toggle:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+
+.canvas-overlay__wbs-toggle--active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
 /* Inspector title text field */
 .inspector-title {
   width: 100%;
@@ -988,6 +1013,22 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* WBS number badge shown inside the node title when WBS mode is active */
+.map-node__wbs-number {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: #6b7280;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin-right: 5px;
+  flex-shrink: 0;
+  letter-spacing: 0.02em;
 }
 
 .map-node__rename-input {
