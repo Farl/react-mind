@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { EdgeStyle, LayoutMode, MindmapNode } from "../domain/mindmap";
 import { getDescendantIds } from "../domain/mindmap";
+import { computeWbsNumbers } from "../utils/wbsNumbers";
 
 type PositionedNode = {
   node: MindmapNode;
@@ -22,6 +23,7 @@ type MindmapCanvasProps = {
   collapsedNodeIds: string[];
   editable: boolean;
   layoutMode: LayoutMode;
+  showWbsNumbers?: boolean;
   onSelectNode: (nodeId: string | null) => void;
   onToggleNodeSelection: (nodeId: string) => void;
   onSelectNodes: (nodeIds: string[]) => void;
@@ -63,6 +65,9 @@ const dynamicHNodeGap = (siblingCount: number): number =>
 const dynamicVGap = (siblingCount: number): number =>
   22 + cappedIncrement(siblingCount, 2, 16);
 const MIN_SCALE = 0.5;
+
+// Shared empty map reused when WBS numbers are disabled (avoids allocating a new map on every render)
+const EMPTY_WBS_MAP = new Map<string, string>();
 const MAX_SCALE = 2;
 const SCALE_STEP = 0.1;
 
@@ -940,6 +945,7 @@ export function MindmapCanvas({
   collapsedNodeIds,
   editable,
   layoutMode,
+  showWbsNumbers = false,
   onSelectNode,
   onToggleNodeSelection,
   onSelectNodes,
@@ -953,6 +959,8 @@ export function MindmapCanvas({
   const collapsedSet = useMemo(() => new Set(collapsedNodeIds), [collapsedNodeIds]);
   const hiddenSet = useMemo(() => getHiddenByCollapse(nodes, collapsedSet), [nodes, collapsedSet]);
   const visibleNodes = useMemo(() => nodes.filter((node) => !hiddenSet.has(node.id)), [nodes, hiddenSet]);
+  // WBS numbers computed from full node list (not just visible) so numbering stays stable when nodes are collapsed
+  const wbsNumbers = useMemo(() => (showWbsNumbers ? computeWbsNumbers(nodes) : EMPTY_WBS_MAP), [nodes, showWbsNumbers]);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [scale, setScale] = useState(1);
@@ -1728,7 +1736,13 @@ export function MindmapCanvas({
                         autoFocus
                       />
                     ) : (
-                      <span className="map-node__title">{item.node.title}</span>
+                      <span className="map-node__title">
+                        {showWbsNumbers ? (() => {
+                          const wbsLabel = wbsNumbers.get(item.node.id);
+                          return wbsLabel ? <span className="map-node__wbs-number">{wbsLabel}</span> : null;
+                        })() : null}
+                        {item.node.title}
+                      </span>
                     )}
                     {hasChildren ? (
                       <span
